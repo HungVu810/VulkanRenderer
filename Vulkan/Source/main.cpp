@@ -1,6 +1,5 @@
 #include <VulkanApplication.h>
 
-
 int main() {
 	VulkanApplication app;
 	app.run();
