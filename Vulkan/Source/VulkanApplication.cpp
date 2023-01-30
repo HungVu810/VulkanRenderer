@@ -25,6 +25,8 @@ VulkanApplication::VulkanApplication()
 	, instanceCreateInfo{}
 	, instance{}
 	, debugMessenger{}
+	, queueCreateInfos{}
+	, device{}
 {
 }
 VulkanApplication::~VulkanApplication()
@@ -33,6 +35,7 @@ VulkanApplication::~VulkanApplication()
 	{
 		instance.destroyDebugUtilsMessengerEXT(debugMessenger);
 	}
+	device.destroy();
 	instance.destroy();
 	glfwDestroyWindow(window);
 	glfwTerminate();
@@ -72,7 +75,8 @@ auto VulkanApplication::initLayerNames() noexcept -> void
 	if (!enableValidationLayers) return;
 	std::string validationLayerName = "VK_LAYER_KHRONOS_validation";
 	std::vector<vk::LayerProperties> availableLayers = vk::enumerateInstanceLayerProperties();
-	const auto extractLayerName = [](const VkLayerProperties& availLayer) { return std::string_view(availLayer.layerName); };
+	assertm(!availableLayers.empty(), "No layer can be found");
+	const auto extractLayerName = [](const vk::LayerProperties& availLayer) { return std::string_view(availLayer.layerName); };
 	const auto availableLayersName = availableLayers | std::views::transform(extractLayerName);
 	bool isFound = std::ranges::find(availableLayersName, validationLayerName) != std::end(availableLayersName);
 	assertm(isFound, "Validation layers requested, but is not supported!");
@@ -96,40 +100,63 @@ auto VulkanApplication::initInstanceCreateInfo() -> void {
 	instanceCreateInfo.setPApplicationInfo(&applicationInfo);
 	instanceCreateInfo.setPEnabledLayerNames(layer.getProxy());
 	instanceCreateInfo.setPEnabledExtensionNames(extension.getProxy());
-}
-auto VulkanApplication::extendInstanceCreateInfo() -> void
-{
 	if (!enableValidationLayers) return;
-	instanceCreateInfo.setPNext(&debugMessengerCreateInfo);
+	instanceCreateInfo.setPNext(&debugMessengerCreateInfo); // extend instance create info with debug messenger
 }
-auto VulkanApplication::initInstance() -> void
+auto VulkanApplication::getSuitablePhysicalDevice() const -> vk::PhysicalDevice
 {
-	vk::Result result = vk::createInstance(&instanceCreateInfo, nullptr, &instance);
-	assertm(result == vk::Result::eSuccess, "failed to create instance!");
+	std::vector<vk::PhysicalDevice> physicalDevices = instance.enumeratePhysicalDevices();
+	assertm(!physicalDevices.empty(), "No physical device can be found");
+	const auto isSuitable = [](const vk::PhysicalDevice& physicalDevice)
+	{
+		vk::PhysicalDeviceProperties properties{ physicalDevice.getProperties() };
+		vk::PhysicalDeviceFeatures features{ physicalDevice.getFeatures() };
+		return properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu
+			&& features.geometryShader;
+	};
+	const auto physicalDeviceIter = std::ranges::find_if(physicalDevices, isSuitable);
+	assertm(physicalDeviceIter != physicalDevices.end(), "Can't find a suitable GPU");
+	return *physicalDeviceIter;
 }
-auto VulkanApplication::extendDispatcher() -> void
+auto VulkanApplication::initQueueCreateInfos(const vk::PhysicalDevice& physicalDevice) -> void
 {
-	VULKAN_HPP_DEFAULT_DISPATCHER.init(instance); // support instance dependent EXT function pointers
-	//std::vector<vk::PhysicalDevice> physicalDevices = instance.enumeratePhysicalDevices();
-	//assert(!physicalDevices.empty());
-	//vk::Device device = physicalDevices[0].createDevice({}, nullptr);
-	//VULKAN_HPP_DEFAULT_DISPATCHER.init(device); // device dependent EXT function pointers
+	const auto queueFamilies = physicalDevice.getQueueFamilyProperties();
+	std::vector<uint32_t> suitableQueueFamiles;
+	for (uint32_t i = 0; i < queueFamilies.size(); i++)
+	{
+		if (queueFamilies[i].queueFlags & vk::QueueFlagBits::eGraphics)
+		{
+			suitableQueueFamiles.push_back(i);
+		}
+	}
+	assertm(!suitableQueueFamiles.empty(), "No desired queue family found");
+	queuePriority = { 1.0f };
+	const vk::DeviceQueueCreateInfo queueCreateInfo{ {}, suitableQueueFamiles.front(), queuePriority };
+	queueCreateInfos.push_back(queueCreateInfo);
+}
+auto VulkanApplication::initDevice() -> void
+{
+	const vk::PhysicalDevice physicalDevice{ getSuitablePhysicalDevice() };
+	const vk::PhysicalDeviceFeatures physicalDeviceFeatures{};
+	initQueueCreateInfos(physicalDevice);
+	vk::DeviceCreateInfo deviceCreateInfo{ {}, queueCreateInfos, layer.getProxy(), nullptr, &physicalDeviceFeatures };
+	device = physicalDevice.createDevice(deviceCreateInfo);
 }
 auto VulkanApplication::initDebugMessenger() -> void
 {
 	if (!enableValidationLayers) return;
 	vk::Result result = instance.createDebugUtilsMessengerEXT(&debugMessengerCreateInfo, nullptr, &debugMessenger);
-	assertm(result == vk::Result::eSuccess, "failed to create debug messenger");
+	assertm(result == vk::Result::eSuccess, "Failed to create debug messenger");
 }
 auto VulkanApplication::initVulkan() -> void
 {
 	initDispatcher();
 	initInstanceCreateInfo();
-	extendInstanceCreateInfo();
-	initInstance();
-	extendDispatcher();
+	instance = vk::createInstance(instanceCreateInfo);
+	VULKAN_HPP_DEFAULT_DISPATCHER.init(instance); // extend dispatcher to support instance dependent EXT function pointers
+	initDevice();
+	VULKAN_HPP_DEFAULT_DISPATCHER.init(device); // extend dispatcher to device dependent EXT function pointers
 	initDebugMessenger();
-
 }
 
 auto VulkanApplication::mainLoop() -> void

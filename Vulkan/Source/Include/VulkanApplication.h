@@ -58,6 +58,9 @@ private:
 	vk::InstanceCreateInfo instanceCreateInfo;
 	vk::Instance instance;
 	vk::DebugUtilsMessengerEXT debugMessenger;
+	std::vector<float> queuePriority; // number of queues of a particular queue family index, and their priority (between 0 and 1)
+	std::vector<vk::DeviceQueueCreateInfo> queueCreateInfos;
+	vk::Device device;
 
 public:
 	VulkanApplication();
@@ -74,10 +77,9 @@ private:
 	auto initLayerNames() noexcept -> void;
 	auto initExtensionNames() noexcept -> void;
 	auto initInstanceCreateInfo() -> void;
-	auto extendInstanceCreateInfo() -> void;
-	auto initInstance() -> void;
-	// TODO: initDevice() and set dispatcher to load device dependent ext pointers
-	auto extendDispatcher() -> void;
+	[[nodiscard]] auto getSuitablePhysicalDevice() const -> vk::PhysicalDevice;
+	auto initQueueCreateInfos(const vk::PhysicalDevice& physicalDevice) -> void;
+	auto initDevice() -> void;
 	auto initDebugMessenger() -> void;
 	auto initVulkan() -> void;
 
