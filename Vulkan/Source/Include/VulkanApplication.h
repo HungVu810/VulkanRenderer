@@ -31,16 +31,20 @@ class Names // forward declare
 {
 public:
 	Names() : names{}, proxy{} {};
+	Names(std::vector<std::string>&& inNames) : names{ inNames }, proxy{} {};
 	[[nodiscard]] auto getProxy() noexcept -> const std::vector<const char*>&
 	{
 		proxy.clear();
 		proxy.resize(names.size());
-		for (size_t i = 0; i < proxy.size(); i++)
+		const auto populateProxy = [this](size_t i)
 		{
 			proxy[i] = names[i].data();
-		}
+		};
+		std::ranges::for_each(std::views::iota(0u, proxy.size()), populateProxy);
 		return proxy;
 	}
+
+public:
 	std::vector<std::string> names;
 
 private:
@@ -49,19 +53,6 @@ private:
 
 class VulkanApplication
 {
-private:
-	GLFWwindow* window;
-	vk::ApplicationInfo applicationInfo;
-	Names extension;
-	Names layer;
-	vk::DebugUtilsMessengerCreateInfoEXT debugMessengerCreateInfo;
-	vk::InstanceCreateInfo instanceCreateInfo;
-	vk::Instance instance;
-	vk::DebugUtilsMessengerEXT debugMessenger;
-	std::vector<float> queuePriority; // number of queues of a particular queue family index, and their priority (between 0 and 1)
-	std::vector<vk::DeviceQueueCreateInfo> queueCreateInfos;
-	vk::Device device;
-
 public:
 	VulkanApplication();
 	~VulkanApplication();
@@ -74,13 +65,16 @@ private:
 	auto initWindow() -> void;
 
 	auto initDispatcher() -> void;
-	auto initLayerNames() noexcept -> void;
-	auto initExtensionNames() noexcept -> void;
+	auto initLayer() noexcept -> void;
+	auto initInstanceExtension() noexcept -> void;
 	auto initInstanceCreateInfo() -> void;
 	[[nodiscard]] auto getSuitablePhysicalDevice() const -> vk::PhysicalDevice;
-	auto initQueueCreateInfos(const vk::PhysicalDevice& physicalDevice) -> void;
+	auto initQueueCreateInfos(const vk::PhysicalDevice& physicalDevice) noexcept -> void;
+	auto initDeviceExtension() noexcept -> void;
 	auto initDevice() -> void;
+	auto initQueue() -> void;
 	auto initDebugMessenger() -> void;
+	auto initWindowSurface() -> void;
 	auto initVulkan() -> void;
 
 	auto mainLoop() -> void;
@@ -96,6 +90,25 @@ private:
 		std::cerr << "[[ VALIDATION LAYER ]] " << pCallbackData->pMessage << '\n';
 		return VK_FALSE;
 	}
+
+private:
+	GLFWwindow* window;
+	vk::ApplicationInfo applicationInfo;
+	Names layer, instanceExtension, deviceExtension;
+	vk::DebugUtilsMessengerCreateInfoEXT debugMessengerCreateInfo;
+	vk::InstanceCreateInfo instanceCreateInfo;
+	vk::Instance instance;
+	vk::DebugUtilsMessengerEXT debugMessenger;
+	// stores a queue family index, and the associated queues + their priority level
+	using queueFamilyIndex = uint32_t;
+	using queuesPriority = std::vector<float>;
+	using queueFamily = std::pair<queueFamilyIndex, queuesPriority>;
+	std::vector<queueFamily> queueFamilies;
+	std::vector<vk::DeviceQueueCreateInfo> queueCreateInfos;
+	vk::Device device;
+	vk::Queue queue;
+	vk::SurfaceKHR surface;
+
 };
 
 
