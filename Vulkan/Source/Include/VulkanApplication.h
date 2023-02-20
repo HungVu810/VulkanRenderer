@@ -13,6 +13,10 @@
 #include <algorithm>
 #include <cstring>
 #include <array>
+#include <functional>
+#include <cstdint> // needed for uint32_t
+#include <limits> // needed for std::numeric_limits
+#include <algorithm> // needed for std::clamp
 
 // Use (void) to silence unused warnings.
 #define assertm(exp, msg) assert(((void)msg, exp))
@@ -51,6 +55,13 @@ private:
 	std::vector<const char*> proxy; // Used with the Vulkan API, which is just vector names's std::string casted to const char* const
 };
 
+struct SurfaceAttributes
+{
+	vk::SurfaceCapabilitiesKHR capabilities;
+	std::vector<vk::SurfaceFormatKHR> formats;
+	std::vector<vk::PresentModeKHR> presentModes;
+};
+
 class VulkanApplication
 {
 public:
@@ -65,21 +76,24 @@ private:
 	auto initWindow() -> void;
 
 	auto initDispatcher() -> void;
+	// initInstance --------- START
 	auto initLayer() noexcept -> void;
 	auto initInstanceExtension() noexcept -> void;
-	auto initInstanceCreateInfo() -> void;
-	[[nodiscard]] auto getSuitablePhysicalDevice() const -> vk::PhysicalDevice;
-	auto initQueueCreateInfos(const vk::PhysicalDevice& physicalDevice) noexcept -> void;
+	auto initInstance() -> void;
+	// initInstance --------- END
+	auto initDebugMessenger() -> void;
+	auto initSurface() -> void;
+	// initPhysicalDevice --------- START
 	auto initDeviceExtension() noexcept -> void;
+	auto initQueueCreateInfos(const vk::PhysicalDevice& physicalDevice) noexcept -> void;
+	auto initPhysicalDevice() -> void;
+	// initPhysicalDevice --------- END
 	auto initDevice() -> void;
 	auto initQueue() -> void;
-	auto initDebugMessenger() -> void;
-	auto initWindowSurface() -> void;
+	auto initSwapChain() -> void;
 	auto initVulkan() -> void;
 
 	auto mainLoop() -> void;
-
-	auto cleanup() -> void;
 
 	static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 		VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -100,15 +114,16 @@ private:
 	vk::Instance instance;
 	vk::DebugUtilsMessengerEXT debugMessenger;
 	// stores a queue family index, and the associated queues + their priority level
-	using queueFamilyIndex = uint32_t;
-	using queuesPriority = std::vector<float>;
-	using queueFamily = std::pair<queueFamilyIndex, queuesPriority>;
-	std::vector<queueFamily> queueFamilies;
+	using QueueFamilyIndex = uint32_t;
+	using QueuesPriority = std::vector<float>;
+	using QueueFamily = std::pair<QueueFamilyIndex, QueuesPriority>;
+	std::vector<QueueFamily> queueFamilies;
 	std::vector<vk::DeviceQueueCreateInfo> queueCreateInfos;
+	vk::PhysicalDevice physicalDevice;
 	vk::Device device;
 	vk::Queue queue;
 	vk::SurfaceKHR surface;
-
+	vk::SwapchainKHR swapChain;
 };
 
 
