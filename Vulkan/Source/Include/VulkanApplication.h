@@ -3,41 +3,28 @@
 #include <GLFW/glfw3.h>
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
-#include <ranges>
 #include <iostream>
-#include <stdexcept>
-#include <cassert>
-#include <cstdlib>
-#include <memory>
 #include <vector>
-#include <algorithm>
-#include <cstring>
-#include <array>
-#include <functional>
-#include <cstdint> // Needed for uint32_t
-#include <limits> // Needed for std::numeric_limits
-#include <algorithm> // Needed for std::clamp
 
 #ifdef NDEBUG
-	const bool enableValidationLayers = false;
+	const bool bEnableValidationLayers = false;
 #else
-	const bool enableValidationLayers = true;
+	const bool isValidationLayersEnabled = true;
 #endif
 
 // Use (void) to silence unused warnings.
 #define assertm(exp, msg) assert(((void)msg, exp))
 
-constexpr uint32_t WIDTH = 800;
-constexpr uint32_t HEIGHT = 600;
+constexpr auto WIDTH = uint32_t{ 800 };
+constexpr auto HEIGHT = uint32_t{ 600 };
 constexpr auto print = [](const auto& in) { std::cout << in << '\n'; };
 
-// Forward declare --------- START
-namespace
+namespace tag
 {
-	class Names;
-	struct SurfaceAttributes;
+	constexpr auto warning = std::string_view{    "[[-------WARNING------]] " };
+	constexpr auto exception = std::string_view{  "[[------EXCEPTION-----]] " };
+	constexpr auto validation = std::string_view{ "[[     VALIDATION     ]] " };
 }
-// Forward declare --------- END
 
 class VulkanApplication
 {
@@ -47,22 +34,24 @@ public:
 
 	// All exceptions are handled in this function so we can clean up the
 	// resources thereafter.
-	auto run() noexcept -> void;
+	void run() noexcept;
 
 private:
-	auto initWindow() -> void;
+	void initWindow();
 
-	auto initDispatcher() -> void;
-	auto initInstance() -> void;
-	auto initDebugMessenger() -> void;
-	auto initSurface() -> void;
-	auto initPhysicalDevice() -> void;
-	auto initDevice() -> void;
-	auto initQueue() -> void;
-	auto initSwapChain() -> void;
-	auto initVulkan() -> void;
+	void initDispatcher();
+	void initInstance();
+	void initDebugMessenger();
+	void initSurface();
+	void initPhysicalDevice();
+	void initDevice();
+	void initQueue();
+	void initSwapChain();
+	void initImageViews();
+	void initGraphicPipeline();
+	void initVulkan();
 
-	auto mainLoop() -> void;
+	void mainLoop();
 
 	static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 		VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -70,7 +59,7 @@ private:
 		const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
 		void* pUserData)
 	{
-		std::cerr << "[[ VALIDATION LAYER ]] " << pCallbackData->pMessage << '\n';
+		std::cerr << tag::validation << pCallbackData->pMessage << '\n';
 		return VK_FALSE;
 	}
 
@@ -83,7 +72,8 @@ private:
 	vk::PhysicalDevice physicalDevice;
 	vk::Device device;
 	vk::Queue queue;
-	vk::SwapchainKHR swapChain;
+	vk::SwapchainKHR swapchain;
+	std::vector<vk::ImageView> imageViews;
 };
 
 

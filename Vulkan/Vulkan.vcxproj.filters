@@ -26,5 +26,15 @@
     <ClInclude Include="Source\Include\VulkanApplication.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Include\Geometry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Shader\Fragment.glsl" />
+    <None Include="Shader\Vertex.glsl" />
+    <None Include="Script\Compile.bat">
+      <Filter>Source Files</Filter>
+    </None>
   </ItemGroup>
 </Project>
