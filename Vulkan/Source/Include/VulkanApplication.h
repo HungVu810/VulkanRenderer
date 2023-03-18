@@ -48,6 +48,7 @@ private:
 	void initQueue();
 	void initSwapChain();
 	void initImageViews();
+	void initRenderPass();
 	void initGraphicPipeline();
 	void initVulkan();
 
@@ -59,7 +60,10 @@ private:
 		const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
 		void* pUserData)
 	{
-		std::cerr << tag::validation << pCallbackData->pMessage << '\n';
+		const auto message = std::string{ pCallbackData->pMessage };
+		const auto pos = message.find("Error");
+		if (pos != std::string::npos) throw std::runtime_error{ message }; // This is likely a programming error
+		std::cerr << tag::validation << message << '\n';
 		return VK_FALSE;
 	}
 
@@ -72,8 +76,13 @@ private:
 	vk::PhysicalDevice physicalDevice;
 	vk::Device device;
 	vk::Queue queue;
+	vk::SurfaceFormatKHR surfaceFormat;
+	vk::Extent2D surfaceExtent;
 	vk::SwapchainKHR swapchain;
 	std::vector<vk::ImageView> imageViews;
+	vk::RenderPass renderPass;
+	vk::PipelineLayout pipelineLayout;
+	vk::Pipeline graphicPipeline;
 };
 
 

@@ -153,12 +153,11 @@ namespace
 	}
 	[[nodiscard]] auto getShaderFile(const std::string& path)
 	{
-		auto filePath = std::filesystem::path{ path };
 		// TODO: normalize file path?
-		if (!std::filesystem::exists(filePath)) throw std::runtime_error(filePath.string() + std::string{" doesn't exist."});
+		const auto filePath = std::filesystem::path{ path };
 		auto file = std::ifstream{filePath , std::ios::binary};
 		if (!file.is_open()) throw std::runtime_error(std::string{"Can't open file at "} + filePath.string());
-		std::vector<char> shaderFile(std::filesystem::file_size(filePath));
+		auto shaderFile = std::vector<char>(std::filesystem::file_size(filePath));
 		file.read(shaderFile.data(), shaderFile.size());
 		return shaderFile;
 	}
@@ -181,17 +180,25 @@ VulkanApplication::VulkanApplication()
 	, physicalDevice{}
 	, device{}
 	, queue{}
+	, surfaceFormat{}
+	, surfaceExtent{}
 	, swapchain{}
 	, imageViews{}
+	, renderPass{}
+	, pipelineLayout{}
+	, graphicPipeline{}
 {
 }
 VulkanApplication::~VulkanApplication()
 {
-	const auto destroy = [this](const auto& imageView)
+	const auto destroy = [&](const auto& imageView)
 	{
 		device.destroyImageView(imageView);
 	};
 	std::ranges::for_each(imageViews, destroy);
+	device.destroyRenderPass(renderPass);
+	device.destroyPipeline(graphicPipeline);
+	device.destroyPipelineLayout(pipelineLayout);
 	device.destroySwapchainKHR(swapchain);
 	device.destroy();
 	if (isValidationLayersEnabled)
@@ -305,9 +312,9 @@ void VulkanApplication::initQueue()
 void VulkanApplication::initSwapChain()
 {
 	const auto surfaceAttributes = getSurfaceAttributes(surface, physicalDevice);
-	const auto surfaceFormat = getSuitableSurfaceFormat(surfaceAttributes.formats);
+	surfaceFormat = getSuitableSurfaceFormat(surfaceAttributes.formats);
+	surfaceExtent = getSuitableSurfaceExtent(window, surfaceAttributes.capabilities);
 	const auto presentMode = getSuitablePresentMode(surfaceAttributes.presentModes);
-	const auto surfaceExtent = getSuitableSurfaceExtent(window, surfaceAttributes.capabilities);
 	auto imageCount = surfaceAttributes.capabilities.minImageCount + 1;
 	if (surfaceAttributes.capabilities.maxImageCount != 0) // not infinite
 	{
@@ -336,8 +343,6 @@ void VulkanApplication::initSwapChain()
 void VulkanApplication::initImageViews()
 {
 	const auto images = getSwapChainImages(device, swapchain);
-	const auto surfaceAttributes = getSurfaceAttributes(surface, physicalDevice);
-	const auto surfaceFormat = getSuitableSurfaceFormat(surfaceAttributes.formats);
 	const auto toImageViewCreateInfo = [&](const auto& image)
 	{
 		return vk::ImageViewCreateInfo{
@@ -355,10 +360,168 @@ void VulkanApplication::initImageViews()
 	};
 	imageViews = images | std::views::transform(toImageViewCreateInfo) | std::views::transform(toImageView) | std::ranges::to<std::vector>();
 }
+void VulkanApplication::initRenderPass()
+{
+	// Attachment rule when attaching a framebuffer in the swapchain to the viewport
+	const auto colorAttachmentDescription = vk::AttachmentDescription{
+		{}
+		, surfaceFormat.format
+		, vk::SampleCountFlagBits::e1 // One sample, no multisampling
+		, vk::AttachmentLoadOp::eClear // Clear the screen before attaching the framebuffer & depth buffer
+		, vk::AttachmentStoreOp::eStore // Store the rendered framebuffer & depth buffer to memory after rendered
+		, vk::AttachmentLoadOp::eDontCare // Stencil?
+		, vk::AttachmentStoreOp::eDontCare // Stencil?
+		, vk::ImageLayout::eUndefined // pre rendering
+		, vk::ImageLayout::ePresentSrcKHR // post rendering, when the framebuffer is ready for attachment
+	};
+	// Subpass, only one which is the renderpass itself
+	const auto colorAttachmentReference = vk::AttachmentReference{
+		0 // description index in the descriptions array
+		, vk::ImageLayout::eColorAttachmentOptimal
+	};
+	const auto subpassDescription = vk::SubpassDescription{
+		{}
+		, vk::PipelineBindPoint::eGraphics
+		, {}
+		, colorAttachmentReference
+	};
+
+	const auto renderPassCreateInfo = vk::RenderPassCreateInfo{
+		{}
+		, colorAttachmentDescription
+		, subpassDescription
+	};
+	renderPass = device.createRenderPass(renderPassCreateInfo);
+}
 void VulkanApplication::initGraphicPipeline()
 {
+	// Vertex shader stage
 	const auto vertexShaderFile = getShaderFile("Binaries/Shader/Vertex.spv");
+	const auto vertexShaderModuleCreateInfo = vk::ShaderModuleCreateInfo{ {}, vertexShaderFile.size(), (uint32_t*)(vertexShaderFile.data()) };
+	const auto vertexShaderModule = device.createShaderModule(vertexShaderModuleCreateInfo);
+	const auto vertexShaderStageCreateInfo = vk::PipelineShaderStageCreateInfo{
+		{}
+		, vk::ShaderStageFlagBits::eVertex
+		, vertexShaderModule
+		, "main" // entry point
+	};
+	// Fragment shader stage
 	const auto fragmentShaderFile = getShaderFile("Binaries/Shader/Fragment.spv");
+	const auto fragmentCreateInfo = vk::ShaderModuleCreateInfo{ {}, fragmentShaderFile.size(), (uint32_t*)(fragmentShaderFile.data()) };
+	const auto fragmentShaderModule = device.createShaderModule(fragmentCreateInfo);
+	const auto fragmentShaderStageCreateInfo = vk::PipelineShaderStageCreateInfo{
+		{}
+		, vk::ShaderStageFlagBits::eFragment
+		, fragmentShaderModule
+		, "main" // entry point
+	};
+	// Shader stages
+	const auto shaderStagesCreateInfo = std::vector<vk::PipelineShaderStageCreateInfo>{
+		vertexShaderStageCreateInfo
+		, fragmentShaderStageCreateInfo
+	};
+
+	// --------- FIXED-STATES
+	// Support with vertex shader's input
+	const auto vertexInputStateCreateInfo = vk::PipelineVertexInputStateCreateInfo{};
+	// Support with vertex shader's output
+	const auto inputAssemblyStateCreateInfo = vk::PipelineInputAssemblyStateCreateInfo{
+		{}
+		, vk::PrimitiveTopology::eTriangleList,
+	};
+	// Viewport
+	const auto viewport = vk::Viewport{
+		0.0f
+		, 0.0f
+		, static_cast<float>(surfaceExtent.width)
+		, static_cast<float>(surfaceExtent.height)
+		, 0.0f
+		, 1.0f
+	};
+	const auto scissor = vk::Rect2D{ {0, 0}, surfaceExtent };
+	const auto viewportStateCreateInfo = vk::PipelineViewportStateCreateInfo{
+		{}
+		, viewport
+		, scissor
+	};
+	// Rasterizer
+	const auto rasterizationStateCreateInfo = vk::PipelineRasterizationStateCreateInfo{
+		{}
+		, VK_FALSE
+		, VK_FALSE
+		, vk::PolygonMode::eFill
+		, vk::CullModeFlagBits::eBack // cull back face
+		, vk::FrontFace::eClockwise // the front face direction
+		, VK_FALSE // influence the depth?
+		, 0.0f
+		, 0.0f
+		, 0.0f
+		, 1.0f // fragment line thickness
+	};
+	// Multisampling for anti-aliasing
+	const auto multisampleStateCreateInfo = vk::PipelineMultisampleStateCreateInfo{
+		{}
+		, vk::SampleCountFlagBits::e1
+		, VK_FALSE
+	};
+	// Depth and stencil testing
+	const auto depthStencilStateCreateInfo = vk::PipelineDepthStencilStateCreateInfo{};
+	// Color blending, mix the fragment's color value with the value in the framebuffer (if already existed)
+	// Config per attached framebuffer
+	const auto colorBlendAttachmentState = vk::PipelineColorBlendAttachmentState{
+		VK_FALSE
+		, vk::BlendFactor::eOne // Fragment's color
+		, vk::BlendFactor::eZero // Color in the framebuffer
+		, vk::BlendOp::eAdd
+		, vk::BlendFactor::eOne // Fragment's alpha
+		, vk::BlendFactor::eZero // Alpha in the framebuffer
+		, vk::BlendOp::eAdd
+		, vk::ColorComponentFlagBits::eR
+			| vk::ColorComponentFlagBits::eB
+			| vk::ColorComponentFlagBits::eG
+			| vk::ColorComponentFlagBits::eA
+	};
+	// Global color blending settings
+	const auto colorBlendStateCreateInfo = vk::PipelineColorBlendStateCreateInfo{
+		{}
+		, VK_FALSE
+		, vk::LogicOp::eCopy
+		, colorBlendAttachmentState
+	};
+	// --------- FIXED-STATES
+
+	// Dynamic state, used to modify a subset of options of the fixed states without recreating the pipeline
+	const auto dynamicStateCreateInfo = vk::PipelineDynamicStateCreateInfo{};
+
+	// Pipeline layout, for assigning uniform values to shaders
+	const auto pipelineLayoutCreateInfo = vk::PipelineLayoutCreateInfo{};
+	pipelineLayout = device.createPipelineLayout(pipelineLayoutCreateInfo);
+
+	// Graphic pipeline
+	const auto pipelineCreateInfo = vk::GraphicsPipelineCreateInfo{
+		{}
+		, shaderStagesCreateInfo
+		, &vertexInputStateCreateInfo
+		, &inputAssemblyStateCreateInfo
+		, VK_NULL_HANDLE
+		, &viewportStateCreateInfo
+		, &rasterizationStateCreateInfo
+		, &multisampleStateCreateInfo
+		, &depthStencilStateCreateInfo
+		, &colorBlendStateCreateInfo
+		, &dynamicStateCreateInfo
+		, pipelineLayout
+		, renderPass
+		, 0 // Index of the subpass
+		// The next 2 params is used to create multiples pipelines with
+		// multiple pipeline create infos in one single call
+	};
+	const auto resultValue = device.createGraphicsPipeline(VK_NULL_HANDLE, pipelineCreateInfo); // Can cache the pipeline in the VK_NULL_HANDLE argument
+	if (resultValue.result != vk::Result::eSuccess) throw std::runtime_error{ "Failed to create a graphic pipeline" };
+	graphicPipeline = resultValue.value;
+
+	device.destroyShaderModule(vertexShaderModule);
+	device.destroyShaderModule(fragmentShaderModule);
 }
 
 void VulkanApplication::initVulkan()
@@ -375,15 +538,13 @@ void VulkanApplication::initVulkan()
 	initQueue();
 	initSwapChain();
 	initImageViews();
+	initRenderPass();
 	initGraphicPipeline();
 }
 
 void VulkanApplication::mainLoop()
 {
-	//const auto surfaceAttributes = getSurfaceAttributes(surface, physicalDevice);
-	//const auto surfaceFormat = getSuitableSurfaceFormat(surfaceAttributes.formats);
-	//const auto surfaceExtent = getSuitableSurfaceExtent(window, surfaceAttributes.capabilities);
-	// const auto images = getSwapChainImages(device, swapchain);
+	//const auto images = getSwapChainImages(device, swapchain);
 
 	while (!glfwWindowShouldClose(window))
 	{
