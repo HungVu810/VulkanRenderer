@@ -9,6 +9,7 @@
 #include <functional>
 #include <fstream>
 #include <filesystem>
+#include <tuple>
 #include <cstdint> // Needed for uint32_t
 #include <limits> // Needed for std::numeric_limits
 #include <algorithm> // Needed for std::clamp
@@ -136,7 +137,7 @@ namespace
 		const auto isSuitable = [&](QueueFamilyIndex i)
 		{
 			const auto isGraphical = physicalDevice.getQueueFamilyProperties()[i].queueFlags & vk::QueueFlagBits::eGraphics;
-			const auto isSurfaceSupported = physicalDevice.getSurfaceSupportKHR(i, surface); // for presentation
+			const auto isSurfaceSupported = physicalDevice.getSurfaceSupportKHR(i, surface); // For presentation support
 			return isGraphical && isSurfaceSupported;
 		};
 		const auto toQueueFamily = [](QueueFamilyIndex i)
@@ -183,22 +184,36 @@ VulkanApplication::VulkanApplication()
 	, surfaceFormat{}
 	, surfaceExtent{}
 	, swapchain{}
-	, imageViews{}
+	, swapchainImageViews{}
 	, renderPass{}
 	, pipelineLayout{}
 	, graphicPipeline{}
+	, swapchainFramebuffers{}
+	, commandPool{}
+	, commandBuffers{}
+	, isFramebufferPrepaired{}
+	, isFramebufferRendered{}
+	, isPreviousFramebufferPresented{}
 {
 }
 VulkanApplication::~VulkanApplication()
 {
-	const auto destroy = [&](const auto& imageView)
+	// Destroy the objects in reverse order of their creation order
+	device.destroy(isFramebufferPrepaired);
+	device.destroy(isFramebufferRendered);
+	device.destroy(isPreviousFramebufferPresented);
+	device.destroyCommandPool(commandPool);
+	for (const vk::Framebuffer& framebuffer : swapchainFramebuffers)
+	{
+		device.destroyFramebuffer(framebuffer);
+	};
+	device.destroyPipeline(graphicPipeline);
+	device.destroyPipelineLayout(pipelineLayout);
+	device.destroyRenderPass(renderPass);
+	for (const vk::ImageView& imageView : swapchainImageViews)
 	{
 		device.destroyImageView(imageView);
 	};
-	std::ranges::for_each(imageViews, destroy);
-	device.destroyRenderPass(renderPass);
-	device.destroyPipeline(graphicPipeline);
-	device.destroyPipelineLayout(pipelineLayout);
 	device.destroySwapchainKHR(swapchain);
 	device.destroy();
 	if (isValidationLayersEnabled)
@@ -227,11 +242,11 @@ void VulkanApplication::run() noexcept
 
 void VulkanApplication::initWindow()
 {
-	assertm(glfwInit() == GLFW_TRUE, "Failed to initalize GLFW");
+	if (glfwInit() != GLFW_TRUE) throw std::runtime_error{ "Failed to initalize GLFW" };
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Do not create an OpenGL context
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 	window = glfwCreateWindow(WIDTH, HEIGHT, "MyWindow", nullptr, nullptr);
-	assertm(window, "Can't create window");
+	if (!window) throw std::runtime_error{ "Can't create window" };
 }
 
 void VulkanApplication::initDispatcher()
@@ -271,7 +286,7 @@ void VulkanApplication::initSurface()
 {
 	auto surfaceProxy = VkSurfaceKHR{};
 	const auto result = glfwCreateWindowSurface(instance, window, nullptr, &surfaceProxy);
-	assertm(result == VK_SUCCESS, "Failed to create window surface");
+	if (result != VK_SUCCESS) throw std::runtime_error{ "Failed to create window surface" };
 	surface = surfaceProxy;
 }
 void VulkanApplication::initPhysicalDevice()
@@ -343,9 +358,9 @@ void VulkanApplication::initSwapChain()
 void VulkanApplication::initImageViews()
 {
 	const auto images = getSwapChainImages(device, swapchain);
-	const auto toImageViewCreateInfo = [&](const auto& image)
+	const auto toImageView = [&](const vk::Image& image)
 	{
-		return vk::ImageViewCreateInfo{
+		const auto imageViewCreateInfo = vk::ImageViewCreateInfo{
 			{}
 			, image
 			, vk::ImageViewType::e2D
@@ -353,12 +368,9 @@ void VulkanApplication::initImageViews()
 			, {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity}
 			, {vk::ImageAspectFlagBits::eColor, 0u, 1u, 0u, 1u}
 		};
-	};
-	const auto toImageView = [&](const auto& imageViewCreateInfo)
-	{
 		return device.createImageView(imageViewCreateInfo);
 	};
-	imageViews = images | std::views::transform(toImageViewCreateInfo) | std::views::transform(toImageView) | std::ranges::to<std::vector>();
+	swapchainImageViews = images | std::views::transform(toImageView) | std::ranges::to<std::vector>();
 }
 void VulkanApplication::initRenderPass()
 {
@@ -375,21 +387,32 @@ void VulkanApplication::initRenderPass()
 		, vk::ImageLayout::ePresentSrcKHR // post rendering, when the framebuffer is ready for attachment
 	};
 	// Subpass, only one which is the renderpass itself
+	const auto descriptionIndex = 0U;
 	const auto colorAttachmentReference = vk::AttachmentReference{
-		0 // description index in the descriptions array
+		descriptionIndex // Description index in the descriptions array
 		, vk::ImageLayout::eColorAttachmentOptimal
 	};
+
 	const auto subpassDescription = vk::SubpassDescription{
 		{}
 		, vk::PipelineBindPoint::eGraphics
 		, {}
 		, colorAttachmentReference
 	};
-
+	const auto subpassIndex = 0U; // The only subpass itself
+	const auto subpassDependency = vk::SubpassDependency{
+		VK_SUBPASS_EXTERNAL
+		, subpassIndex
+		, vk::PipelineStageFlagBits::eColorAttachmentOutput
+		, vk::PipelineStageFlagBits::eColorAttachmentOutput
+		, vk::AccessFlagBits::eNone
+		, vk::AccessFlagBits::eColorAttachmentWrite
+	};
 	const auto renderPassCreateInfo = vk::RenderPassCreateInfo{
 		{}
 		, colorAttachmentDescription
 		, subpassDescription
+		, subpassDependency
 	};
 	renderPass = device.createRenderPass(renderPassCreateInfo);
 }
@@ -523,35 +546,121 @@ void VulkanApplication::initGraphicPipeline()
 	device.destroyShaderModule(vertexShaderModule);
 	device.destroyShaderModule(fragmentShaderModule);
 }
+void VulkanApplication::initFrameBuffer()
+{
+	swapchainFramebuffers.resize(swapchainImageViews.size());
+	const auto toFramebuffer = [&](const vk::ImageView& imageView)
+	{
+		const auto framebufferCreateInfo = vk::FramebufferCreateInfo{
+			{}
+			, renderPass
+			, imageView
+			, surfaceExtent.width
+			, surfaceExtent.height
+			, 1 // single image, not doing stero-rendering
+		};
+		return device.createFramebuffer(framebufferCreateInfo);
+	};
+	swapchainFramebuffers = swapchainImageViews | std::views::transform(toFramebuffer) | std::ranges::to<std::vector>();
+}
+void VulkanApplication::initCommandPool()
+{
+	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
+	const auto commandPoolCreateInfo = vk::CommandPoolCreateInfo{
+		vk::CommandPoolCreateFlagBits::eResetCommandBuffer // reset and rerecord command buffer
+		, queueFamilies.front().first
+	};
+	commandPool = device.createCommandPool(commandPoolCreateInfo);
+}
+void VulkanApplication::initCommandBuffer()
+{
+	const auto allocateInfo = vk::CommandBufferAllocateInfo{
+		commandPool
+		, vk::CommandBufferLevel::ePrimary
+		, 1
+	};
+	// Command buffers are allocated from the command pool
+	commandBuffers = device.allocateCommandBuffers(allocateInfo);
+}
+void VulkanApplication::recordCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex)
+{
+	const auto commandBufferBeginInfo = vk::CommandBufferBeginInfo{};
+	commandBuffer.begin(commandBufferBeginInfo);
+	const auto clearColorValue = vk::ClearColorValue{0.0f, 0.0f, 0.0f, 1.0f}; // Color to clear the screen with
+	const auto clearValues = std::vector<vk::ClearValue>{clearColorValue};
+	const auto renderPassBeginInfo = vk::RenderPassBeginInfo{
+		renderPass
+		, swapchainFramebuffers[imageIndex]
+		, vk::Rect2D{{0, 0}, surfaceExtent}
+		, clearValues
+	};
+	commandBuffer.beginRenderPass(renderPassBeginInfo, vk::SubpassContents::eInline);
+	commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, graphicPipeline);
+	commandBuffer.draw(3, 1, 0, 0);
+	commandBuffer.endRenderPass();
+	commandBuffer.end();
+}
+void VulkanApplication::initSyncObjects()
+{
+	const auto semCreateInfo = vk::SemaphoreCreateInfo{};
+	const auto fenceCreateInfo = vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled}; // First frame doesn't have to wait for the unexisted previous framebuffer
+	isFramebufferPrepaired = device.createSemaphore(semCreateInfo);
+	isFramebufferRendered = device.createSemaphore(semCreateInfo);
+	isPreviousFramebufferPresented = device.createFence(fenceCreateInfo);
+}
 
 void VulkanApplication::initVulkan()
 {
-	assertm(glfwVulkanSupported() == GLFW_TRUE, "Vulkan is not supported");
+	if (glfwVulkanSupported() != GLFW_TRUE) throw std::runtime_error{"Vulkan is not supported"};
 	initDispatcher();
 	initInstance();
-	VULKAN_HPP_DEFAULT_DISPATCHER.init(instance); // extend dispatcher to support instance dependent EXT function pointers
+	VULKAN_HPP_DEFAULT_DISPATCHER.init(instance); // Extend dispatcher to support instance dependent EXT function pointers
 	initDebugMessenger();
 	initSurface();
 	initPhysicalDevice();
 	initDevice();
-	VULKAN_HPP_DEFAULT_DISPATCHER.init(device); // extend dispatcher to device dependent EXT function pointers
+	VULKAN_HPP_DEFAULT_DISPATCHER.init(device); // Extend dispatcher to device dependent EXT function pointers
 	initQueue();
 	initSwapChain();
 	initImageViews();
 	initRenderPass();
 	initGraphicPipeline();
+	initFrameBuffer();
+	initCommandPool();
+	initCommandBuffer();
+	initSyncObjects();
 }
 
 void VulkanApplication::mainLoop()
 {
-	//const auto images = getSwapChainImages(device, swapchain);
-
 	while (!glfwWindowShouldClose(window))
 	{
 		glfwPollEvents();
+		drawFrame();
 	}
+
+	device.waitIdle();
 }
 
-
+void VulkanApplication::drawFrame()
+{
+	// Get framebufer
+	std::ignore = device.waitForFences(isPreviousFramebufferPresented, VK_TRUE, UINT64_MAX); // Block until fences is signaled
+	device.resetFences(isPreviousFramebufferPresented);
+	const auto resultValue = device.acquireNextImageKHR(swapchain, UINT64_MAX, isFramebufferPrepaired, VK_NULL_HANDLE);
+	// Record and submit commandbuffer for that framebuffer
+	const auto imageIndex = resultValue.value;
+	auto& commandBuffer = commandBuffers.front();
+	commandBuffer.reset();
+	recordCommandBuffer(commandBuffer, imageIndex);
+	const auto toPipelineStageFlags = [](const vk::PipelineStageFlagBits& bit){ return static_cast<vk::PipelineStageFlags>(bit); };
+	const auto stages = std::vector{vk::PipelineStageFlagBits::eColorAttachmentOutput};
+	const auto waitStages = stages | std::views::transform(toPipelineStageFlags) | std::ranges::to<std::vector>(); 
+	auto submitInfo = vk::SubmitInfo{isFramebufferPrepaired, waitStages, commandBuffer, isFramebufferRendered};
+	queue.submit(submitInfo, isPreviousFramebufferPresented);
+	// Present
+	const auto presentInfo = vk::PresentInfoKHR{isFramebufferRendered, swapchain, imageIndex};
+	std::ignore = queue.presentKHR(presentInfo);
+}
 
 
