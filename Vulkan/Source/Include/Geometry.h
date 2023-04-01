@@ -4,30 +4,21 @@
 #include <vector>
 #include <array>
 
+namespace format
+{
+	constexpr auto floatType = vk::Format::eR32Sfloat;
+	constexpr auto vec2 = vk::Format::eR32G32Sfloat;
+	constexpr auto vec3 = vk::Format::eR32G32B32Sfloat;
+	constexpr auto vec4 = vk::Format::eR32G32B32A32Sfloat;
+}
+
 struct Vertex
 {
 	glm::vec3 position;
 	glm::vec3 normal;
-	glm::vec3 color; // RGB
+	glm::vec3 color;
 	// std::variant<glm::vec3, glm::vec2> color/textcoord ?
 	// glm::vec2 textcoord;
-
-	consteval static auto getVertexInputBindingDescription()
-	{
-		return vk::VertexInputBindingDescription{
-			0,
-			sizeof(Vertex),
-		};
-	}
-
-	consteval static auto getVertexInputAttributeDescription()
-	{
-		 return std::array<vk::VertexInputAttributeDescription, 3>{
-			 vk::VertexInputAttributeDescription{0, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(Vertex, position)}
-			 , {1, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(Vertex, normal)}
-			 , {2, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(Vertex, color)}
-		 };
-	}
 };
 
 // each model's mesh are drawn independantly since drawing the whole model messed up the texture
@@ -40,4 +31,13 @@ struct Mesh{
 	//std::vector<std::shared_ptr<gl_texture>> material;
 	//// shininess level for the mesh's phong-specularity calculation
 	//float shininess = -1.0f;
+};
+
+class GeometryFactory
+{
+	// line
+	// square, triangle, circle
+	// cube, prism, sphere
+	// common scenes (castle, standford room)
+	// common props (bunny, teapot,..)
 };

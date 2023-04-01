@@ -31,8 +31,8 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="Shader\Fragment.glsl" />
-    <None Include="Shader\Vertex.glsl" />
+    <None Include="Shader\GeneralFragment.glsl" />
+    <None Include="Shader\GeneralVertex.glsl" />
     <None Include="Script\Compile.bat">
       <Filter>Source Files</Filter>
     </None>

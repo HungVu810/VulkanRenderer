@@ -172,8 +172,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Script\Compile.bat" />
-    <None Include="Shader\Fragment.glsl" />
-    <None Include="Shader\Vertex.glsl" />
+    <None Include="Shader\GeneralFragment.glsl" />
+    <None Include="Shader\GeneralVertex.glsl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

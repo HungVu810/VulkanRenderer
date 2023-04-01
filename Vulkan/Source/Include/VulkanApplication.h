@@ -5,6 +5,7 @@
 #include <vulkan/vulkan.hpp>
 #include <iostream>
 #include <vector>
+#include <thread>
 
 #ifdef NDEBUG
 	const bool bEnableValidationLayers = false;
@@ -12,19 +13,20 @@
 	const bool isValidationLayersEnabled = true;
 #endif
 
-constexpr auto WIDTH = uint32_t{ 800 };
-constexpr auto HEIGHT = uint32_t{ 600 };
-constexpr auto print = [](const auto& in) { std::cout << in << '\n'; };
-
 namespace tag
 {
+	constexpr auto log = std::string_view{        "[[     LOG     ]] " };
 	constexpr auto warning = std::string_view{    "[[---WARNING---]] " };
 	constexpr auto exception = std::string_view{  "[[--EXCEPTION--]] " };
 	constexpr auto error     = std::string_view{  "[[----ERROR----]] " };
 	constexpr auto validation = std::string_view{ "[[  VALIDATES  ]] " };
 }
 
-inline void assertm(bool condition, std::string_view message)
+constexpr auto WIDTH = uint32_t{ 800 };
+constexpr auto HEIGHT = uint32_t{ 600 };
+constexpr auto print = [](const auto& in) { std::cout << in << '\n'; };
+constexpr auto isAlpha = [](char c){ return std::isalpha(c); };
+inline constexpr void assertm(bool condition, std::string_view message)
 {
 	if (!condition)
 	{
@@ -75,14 +77,17 @@ private:
 		void* pUserData)
 	{
 		const auto message = std::string{ pCallbackData->pMessage };
-		const auto pos = message.find("Error");
-		assertm(pos == std::string::npos, message); // This is likely a programming error
-		std::cerr << tag::validation << message << '\n';
+		const auto posError = message.find("Error");
+		assertm(posError == std::string::npos, message); // This is likely a programming error
+		const auto posWarning = message.find("Warning");
+		const auto tagToUse = posWarning == std::string::npos ? tag::validation : tag::warning;
+		std::cerr << tagToUse << message << '\n';
 		return VK_FALSE;
 	}
 
 private:
 	GLFWwindow* window;
+	std::thread validateShadersWorker;
 	vk::Instance instance;
 	vk::DebugUtilsMessengerCreateInfoEXT debugMessengerCreateInfo; // needed ?
 	vk::DebugUtilsMessengerEXT debugMessenger;
@@ -95,14 +100,16 @@ private:
 	vk::SwapchainKHR swapchain;
 	std::vector<vk::ImageView> swapchainImageViews;
 	vk::RenderPass renderPass;
+	vk::Buffer vertexBuffer;
+	vk::DeviceMemory vertexBufferMemory;
 	vk::PipelineLayout pipelineLayout;
 	vk::Pipeline graphicPipeline;
-	std::vector<vk::Framebuffer> swapchainFramebuffers;
+	std::vector<vk::Framebuffer> framebuffers;
 	vk::CommandPool commandPool;
 	std::vector<vk::CommandBuffer> commandBuffers;
-	vk::Semaphore isFramebufferPrepaired;
-	vk::Semaphore isFramebufferRendered;
-	vk::Fence isPreviousFramebufferPresented;
+	vk::Semaphore isPresentationEngineReadFinished;
+	vk::Semaphore isImageRendered;
+	vk::Fence isPreviousImagePresented;
 };
 
 

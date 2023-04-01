@@ -14,18 +14,28 @@
 #include <limits> // Needed for std::numeric_limits
 #include <algorithm> // Needed for std::clamp
 #include "VulkanApplication.h"
+#include "Geometry.h"
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 namespace
 {
-	// Class/Structs
-	// Return a container of cstr proxies from names, which is used by the Vulkan API
-	[[nodiscard]] auto getNamesProxy(const std::vector<std::string>& names) noexcept
+	// Enums
+	enum class ShaderStage
 	{
-		const auto toRawString = [](std::string_view str) { return str.data(); };
-		auto proxies = names | std::views::transform(toRawString) | std::ranges::to<std::vector>();
-		return proxies;
-	}
+		vert // Vertex shader
+		, tesc // Tessellation control shader
+		, tese // Tessellation evaluation shader
+		, geom // Geometry shadr
+		, frag // Fragment shader
+		, comp // Compute shader
+	};
+	using CurrentLastWriteTime = std::filesystem::file_time_type;
+	using ShaderSourceProperties = std::tuple<std::filesystem::path, ShaderStage, CurrentLastWriteTime>;
+	using QueueFamilyIndex = uint32_t;
+	using QueuesPriorities = std::vector<float>;
+	using QueueFamily = std::pair<QueueFamilyIndex, QueuesPriorities>;
+
+	// Classes/Structs
 	struct SurfaceAttributes
 	{
 		vk::SurfaceCapabilitiesKHR capabilities;
@@ -34,9 +44,12 @@ namespace
 	};
 
 	// Helper functions
-	using QueueFamilyIndex = uint32_t;
-	using QueuesPriorities = std::vector<float>;
-	using QueueFamily = std::pair<QueueFamilyIndex, QueuesPriorities>;
+	[[nodiscard]] auto getNamesProxy(const std::vector<std::string>& names) noexcept // Return a container of cstr proxies from names, which is used by the Vulkan API
+	{
+		const auto toRawString = [](std::string_view str) { return str.data(); };
+		auto proxies = names | std::views::transform(toRawString) | std::ranges::to<std::vector>();
+		return proxies;
+	}
 	[[nodiscard]] auto getEnabledLayersName()
 	{
 		auto strings = std::vector<std::string>{};
@@ -133,7 +146,7 @@ namespace
 	[[nodiscard]] auto getSuitableQueueFamilies(const vk::PhysicalDevice& physicalDevice, vk::SurfaceKHR& surface) noexcept
 	{
 		const auto queueFamiliesProperties = physicalDevice.getQueueFamilyProperties();
-		const auto queueFamiliesIndex = std::views::iota(0u, queueFamiliesProperties.size());
+		const auto queueFamiliesIndex = std::views::iota(0U, queueFamiliesProperties.size());
 		const auto isSuitable = [&](QueueFamilyIndex i)
 		{
 			const auto isGraphical = physicalDevice.getQueueFamilyProperties()[i].queueFlags & vk::QueueFlagBits::eGraphics;
@@ -142,30 +155,114 @@ namespace
 		};
 		const auto toQueueFamily = [](QueueFamilyIndex i)
 		{
-			return QueueFamily{ i, { 1.0f } }; // One queue of priority level 1
+			return QueueFamily{i, {1.0f}}; // One queue of priority level 1
 		};
 		auto queueFamilies = queueFamiliesIndex | std::views::filter(isSuitable) | std::views::transform(toQueueFamily) | std::ranges::to<std::vector>();
 		return queueFamilies;
 	}
-	[[nodiscard]] auto getSwapChainImages(const vk::Device& device, const vk::SwapchainKHR& swapchain) noexcept
+	[[nodiscard]] auto getShaderBinary(const std::string& path)
 	{
-		const auto images = device.getSwapchainImagesKHR(swapchain);
-		return images;
-	}
-	[[nodiscard]] auto getShaderFile(const std::string& path)
-	{
-		// TODO: normalize file path?
-		const auto filePath = std::filesystem::path{ path };
+		const auto filePath = std::filesystem::path{path};
 		auto file = std::ifstream{filePath , std::ios::binary};
 		if (!file.is_open()) throw std::runtime_error(std::string{"Can't open file at "} + filePath.string());
-		auto shaderFile = std::vector<char>(std::filesystem::file_size(filePath));
-		file.read(shaderFile.data(), shaderFile.size());
-		return shaderFile;
+		auto shaderBinary = std::vector<char>(std::filesystem::file_size(filePath));
+		file.read(shaderBinary.data(), shaderBinary.size());
+		return shaderBinary;
+	}
+	[[nodiscard]] inline auto getEnumeration(const auto& container)
+	{
+		return std::views::zip(std::views::iota(0U, container.size()), container);
+	}
+	[[nodiscard]] inline auto unquotePathString(const std::filesystem::path& path) // Remove quotes returned by path.string()
+	{
+		auto stringStreamPath = std::stringstream{path.string()};
+		auto unquotedPathString = std::string{};
+		stringStreamPath >> std::quoted(unquotedPathString);
+		return unquotedPathString;
+	}
+	[[nodiscard]] inline auto toString(const std::filesystem::file_time_type& writeTime)
+	{
+		auto sstream = std::stringstream{};
+		auto writeTimeString = std::string{};
+		sstream << writeTime;
+		std::getline(sstream, writeTimeString);
+		return writeTimeString;
+	}
+	[[nodiscard]] auto getShaderCompileCommand(const ShaderSourceProperties& shaderSourceProperties)
+	{
+		const auto& [shaderPathRelative, shaderStage, _] = shaderSourceProperties;
+		const auto shaderPath = std::filesystem::absolute(shaderPathRelative);
+		const auto compilerPath = std::filesystem::absolute(std::filesystem::path("Dependencies/glslc.exe"));
+		const auto binaryPath = std::filesystem::absolute(std::filesystem::path("Binaries/Shader/")/(shaderPath.stem().string() + std::string{".spv"}));
+		auto shaderStageName = std::string{};
+		switch (shaderStage)
+		{
+			case ShaderStage::vert: shaderStageName = "vert"; break;
+			case ShaderStage::tese: shaderStageName = "tese"; break;
+			case ShaderStage::tesc: shaderStageName = "tesc"; break;
+			case ShaderStage::geom: shaderStageName = "geom"; break;
+			case ShaderStage::frag: shaderStageName = "frag"; break;
+			case ShaderStage::comp: shaderStageName = "comp"; break;
+		};
+		auto command = std::stringstream{};
+		const auto unquotedShaderPathString = unquotePathString(shaderPath);
+		const auto unquotedCompilerPathString = unquotePathString(compilerPath);
+		const auto unquotedBinaryPathString = unquotePathString(binaryPath);
+		command << unquotedCompilerPathString << " " << "-fshader-stage=" << shaderStageName << " " << unquotedShaderPathString << " -o " << unquotedBinaryPathString;
+		return command.str();
+	}
+	void validateShaders()
+	{
+		const auto shaderSourcesProperties = std::vector<ShaderSourceProperties>{
+			{"Shader/GeneralVertex.glsl", ShaderStage::vert, std::filesystem::last_write_time("Shader/GeneralVertex.glsl")}
+			, {"Shader/GeneralFragment.glsl", ShaderStage::frag, std::filesystem::last_write_time("Shader/GeneralFragment.glsl")}
+		};
+		const auto lastWriteTimesFilePath = std::filesystem::path{"Shader/LastWriteTimes.txt"};
+		auto lastWriteTimesFile = std::fstream{};
+		if (!std::filesystem::exists(lastWriteTimesFilePath)) lastWriteTimesFile = std::fstream{lastWriteTimesFilePath, std::ios::out}; // Create a file to write the write times into.
+		lastWriteTimesFile = std::fstream{lastWriteTimesFilePath, std::ios::in | std::ios::out}; // Reopen in read and write modes. Using open() doesn't work as expected sometimes, assigning new fstreams instead
+		const auto compileAndWriteToFile = [&](const ShaderSourceProperties& shaderSourceProperties)
+		{
+			const auto& [shaderPath, _, currentLastWriteTime] = shaderSourceProperties;
+			const auto compileCommand = getShaderCompileCommand(shaderSourceProperties);
+			std::cout << tag::warning << "Compiling shader at " << shaderPath << '\n';
+			if (std::system(compileCommand.data()) == 0)
+			{
+				std::cout << tag::warning << "Finished\n";
+				lastWriteTimesFile << currentLastWriteTime << std::endl;
+			}
+			else lastWriteTimesFile << "Failed to compile shader" << std::endl;
+		};
+		if (std::filesystem::is_empty(lastWriteTimesFilePath))
+		{
+			std::ranges::for_each(shaderSourcesProperties, compileAndWriteToFile);
+			return;
+		}
+		auto writeTime = std::string{};
+		auto lastWriteTimes = std::vector<std::string>{};
+		while (std::getline(lastWriteTimesFile, writeTime)) lastWriteTimes.push_back(writeTime);
+		lastWriteTimesFile = std::fstream{lastWriteTimesFilePath, std::ios::out | std::ios::trunc}; // Truncate mode will clear the file first for writting.
+		if (lastWriteTimes.size() < shaderSourcesProperties.size()) // New shaders need to be compiled whose last write time hasn't been captured
+		{
+			const auto different = shaderSourcesProperties.size() - lastWriteTimes.size();
+			for (size_t i = 0; i < different; i++) lastWriteTimes.push_back("New shader");
+		}
+		for (const auto& [lastWriteTime, shaderSourceProperties] : std::views::zip(lastWriteTimes, shaderSourcesProperties))
+		{
+			const auto& [shaderPath, _, currentLastWriteTime] = shaderSourceProperties;
+			if (lastWriteTime != toString(currentLastWriteTime)) compileAndWriteToFile(shaderSourceProperties);
+			else
+			{
+				std::cout << tag::log << "Shader at " << shaderPath << " has no modifications\n";
+				lastWriteTimesFile << currentLastWriteTime << std::endl;
+			}
+		}
 	}
 }
 
 VulkanApplication::VulkanApplication()
-	: window{ nullptr }
+	: window{nullptr}
+	, validateShadersWorker{}
 	, instance{}
 	, debugMessengerCreateInfo{
 		{}
@@ -186,40 +283,34 @@ VulkanApplication::VulkanApplication()
 	, swapchain{}
 	, swapchainImageViews{}
 	, renderPass{}
+	, vertexBuffer{}
 	, pipelineLayout{}
 	, graphicPipeline{}
-	, swapchainFramebuffers{}
+	, framebuffers{}
 	, commandPool{}
 	, commandBuffers{}
-	, isFramebufferPrepaired{}
-	, isFramebufferRendered{}
-	, isPreviousFramebufferPresented{}
+	, isPresentationEngineReadFinished{}
+	, isImageRendered{}
+	, isPreviousImagePresented{}
 {
 }
 VulkanApplication::~VulkanApplication()
 {
 	// Destroy the objects in reverse order of their creation order
-	device.destroy(isFramebufferPrepaired);
-	device.destroy(isFramebufferRendered);
-	device.destroy(isPreviousFramebufferPresented);
+	device.destroy(isPresentationEngineReadFinished);
+	device.destroy(isImageRendered);
+	device.destroy(isPreviousImagePresented);
 	device.destroyCommandPool(commandPool);
-	for (const vk::Framebuffer& framebuffer : swapchainFramebuffers)
-	{
-		device.destroyFramebuffer(framebuffer);
-	};
+	for (const vk::Framebuffer& framebuffer : framebuffers) device.destroyFramebuffer(framebuffer);
 	device.destroyPipeline(graphicPipeline);
 	device.destroyPipelineLayout(pipelineLayout);
+	device.freeMemory(vertexBufferMemory);
+	device.destroyBuffer(vertexBuffer);
 	device.destroyRenderPass(renderPass);
-	for (const vk::ImageView& imageView : swapchainImageViews)
-	{
-		device.destroyImageView(imageView);
-	};
+	for (const vk::ImageView& imageView : swapchainImageViews) device.destroyImageView(imageView);
 	device.destroySwapchainKHR(swapchain);
 	device.destroy();
-	if (isValidationLayersEnabled)
-	{
-		instance.destroyDebugUtilsMessengerEXT(debugMessenger);
-	}
+	if (isValidationLayersEnabled) instance.destroyDebugUtilsMessengerEXT(debugMessenger);
 	instance.destroySurfaceKHR(surface);
 	instance.destroy();
 	glfwDestroyWindow(window);
@@ -230,6 +321,7 @@ void VulkanApplication::run() noexcept
 {
 	try
 	{
+		validateShadersWorker = std::thread{validateShaders};
 		initWindow(); // Must be before initVulkan()
 		initVulkan();
 		mainLoop();
@@ -339,14 +431,14 @@ void VulkanApplication::initSwapChain()
 	vk::SwapchainCreateInfoKHR createInfo{
 		{}
 		, surface
-		, imageCount // number of framebuffers
+		, imageCount
 		, surfaceFormat.format
 		, surfaceFormat.colorSpace
-		, surfaceExtent // width and height for the framebuffers
-		, 1 // specifies the amount of image's layers (ie: more than 1 for 3D stereoscopic application)
+		, surfaceExtent
+		, 1 // Number of layers per image, more than 1 for stereoscopic application
 		, vk::ImageUsageFlagBits::eColorAttachment // render directly onto the framebuffers (no post-processing)
-		, vk::SharingMode::eExclusive // drawing and presentation are done with one physical device's queue
-		, queueFamilies.front().first // get the first queue family index
+		, vk::SharingMode::eExclusive // Drawing and presentation are done with one physical device's queue
+		, queueFamilies.front().first
 		, surfaceAttributes.capabilities.currentTransform
 		, vk::CompositeAlphaFlagBitsKHR::eOpaque
 		, presentMode
@@ -357,7 +449,7 @@ void VulkanApplication::initSwapChain()
 }
 void VulkanApplication::initImageViews()
 {
-	const auto images = getSwapChainImages(device, swapchain);
+	const auto images = device.getSwapchainImagesKHR(swapchain);
 	const auto toImageView = [&](const vk::Image& image)
 	{
 		const auto imageViewCreateInfo = vk::ImageViewCreateInfo{
@@ -374,43 +466,45 @@ void VulkanApplication::initImageViews()
 }
 void VulkanApplication::initRenderPass()
 {
-	// Attachment rule when attaching a framebuffer in the swapchain to the viewport
-	const auto colorAttachmentDescription = vk::AttachmentDescription{
+	// Descripes how the image views are load/store
+	const auto attachmentDescription = vk::AttachmentDescription{
 		{}
 		, surfaceFormat.format
 		, vk::SampleCountFlagBits::e1 // One sample, no multisampling
-		, vk::AttachmentLoadOp::eClear // Clear the screen before attaching the framebuffer & depth buffer
-		, vk::AttachmentStoreOp::eStore // Store the rendered framebuffer & depth buffer to memory after rendered
-		, vk::AttachmentLoadOp::eDontCare // Stencil?
-		, vk::AttachmentStoreOp::eDontCare // Stencil?
-		, vk::ImageLayout::eUndefined // pre rendering
-		, vk::ImageLayout::ePresentSrcKHR // post rendering, when the framebuffer is ready for attachment
-	};
-	// Subpass, only one which is the renderpass itself
-	const auto descriptionIndex = 0U;
-	const auto colorAttachmentReference = vk::AttachmentReference{
-		descriptionIndex // Description index in the descriptions array
-		, vk::ImageLayout::eColorAttachmentOptimal
+		, vk::AttachmentLoadOp::eClear
+		, vk::AttachmentStoreOp::eStore
+		, vk::AttachmentLoadOp::eDontCare
+		, vk::AttachmentStoreOp::eDontCare
+		, vk::ImageLayout::eUndefined // Pre renderpass instance
+		, vk::ImageLayout::ePresentSrcKHR // Post renderpass instance
 	};
 
+	// Subpass description
+	const auto attachmentIndex = 0U;
+	const auto attachmentReference = vk::AttachmentReference{
+		attachmentIndex
+		, vk::ImageLayout::eColorAttachmentOptimal
+	};
 	const auto subpassDescription = vk::SubpassDescription{
 		{}
 		, vk::PipelineBindPoint::eGraphics
 		, {}
-		, colorAttachmentReference
+		, attachmentReference
 	};
-	const auto subpassIndex = 0U; // The only subpass itself
+
+	// Dependency
 	const auto subpassDependency = vk::SubpassDependency{
-		VK_SUBPASS_EXTERNAL
-		, subpassIndex
+		VK_SUBPASS_EXTERNAL // The other subpass
+		, 0U // This subpass
 		, vk::PipelineStageFlagBits::eColorAttachmentOutput
 		, vk::PipelineStageFlagBits::eColorAttachmentOutput
 		, vk::AccessFlagBits::eNone
 		, vk::AccessFlagBits::eColorAttachmentWrite
 	};
+
 	const auto renderPassCreateInfo = vk::RenderPassCreateInfo{
 		{}
-		, colorAttachmentDescription
+		, attachmentDescription
 		, subpassDescription
 		, subpassDependency
 	};
@@ -418,9 +512,10 @@ void VulkanApplication::initRenderPass()
 }
 void VulkanApplication::initGraphicPipeline()
 {
+	validateShadersWorker.join();
 	// Vertex shader stage
-	const auto vertexShaderFile = getShaderFile("Binaries/Shader/Vertex.spv");
-	const auto vertexShaderModuleCreateInfo = vk::ShaderModuleCreateInfo{ {}, vertexShaderFile.size(), (uint32_t*)(vertexShaderFile.data()) };
+	const auto vertexShaderBinary = getShaderBinary("Binaries/Shader/GeneralVertex.spv");
+	const auto vertexShaderModuleCreateInfo = vk::ShaderModuleCreateInfo{{}, vertexShaderBinary.size(), (uint32_t*)(vertexShaderBinary.data())};
 	const auto vertexShaderModule = device.createShaderModule(vertexShaderModuleCreateInfo);
 	const auto vertexShaderStageCreateInfo = vk::PipelineShaderStageCreateInfo{
 		{}
@@ -429,8 +524,8 @@ void VulkanApplication::initGraphicPipeline()
 		, "main" // entry point
 	};
 	// Fragment shader stage
-	const auto fragmentShaderFile = getShaderFile("Binaries/Shader/Fragment.spv");
-	const auto fragmentCreateInfo = vk::ShaderModuleCreateInfo{ {}, fragmentShaderFile.size(), (uint32_t*)(fragmentShaderFile.data()) };
+	const auto fragmentShaderBinary = getShaderBinary("Binaries/Shader/GeneralFragment.spv");
+	const auto fragmentCreateInfo = vk::ShaderModuleCreateInfo{{}, fragmentShaderBinary.size(), (uint32_t*)(fragmentShaderBinary.data())};
 	const auto fragmentShaderModule = device.createShaderModule(fragmentCreateInfo);
 	const auto fragmentShaderStageCreateInfo = vk::PipelineShaderStageCreateInfo{
 		{}
@@ -446,12 +541,73 @@ void VulkanApplication::initGraphicPipeline()
 
 	// --------- FIXED-STATES
 	// Support with vertex shader's input
-	const auto vertexInputStateCreateInfo = vk::PipelineVertexInputStateCreateInfo{};
-	// Support with vertex shader's output
+	// NDC space
+	const auto bindingNumber = 0U;
+	const auto triangle = std::vector<Vertex>{
+		{{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}}
+		, {{-0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}}
+		, {{0.0f, -0.5f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}}
+	};
+	//const auto totalBytesSize = triangle.size() * sizeof(Vertex);
+	// Vertex input state
+	const auto vertexInputBindingDescription = vk::VertexInputBindingDescription{
+		bindingNumber
+		, sizeof(Vertex)
+	};
+	const auto vertexInputAttributeDescription = std::vector<vk::VertexInputAttributeDescription>{
+		 {0, bindingNumber, format::vec3, offsetof(Vertex, position)}
+		 , {1, bindingNumber, format::vec3, offsetof(Vertex, normal)}
+		 , {2, bindingNumber, format::vec3, offsetof(Vertex, color)}
+	};
+	const auto vertexInputStateCreateInfo = vk::PipelineVertexInputStateCreateInfo{
+		{}
+		, vertexInputBindingDescription
+		, vertexInputAttributeDescription
+	};
+	// Logical buffer
+	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
+	const auto toQueueFamilyIndex = [](const QueueFamily& queueFamily){return queueFamily.first;};
+	const auto queueFamiliesIndex = queueFamilies | std::views::transform(toQueueFamilyIndex) | std::ranges::to<std::vector>();
+	const auto bufferCreateInfo = vk::BufferCreateInfo{
+		{}
+		, triangle.size() * sizeof(Vertex)
+		, vk::BufferUsageFlagBits::eVertexBuffer
+		, vk::SharingMode::eExclusive
+		, queueFamiliesIndex
+	};
+	vertexBuffer = device.createBuffer(bufferCreateInfo);
+	// Physical memory allocation for the logical buffer
+	const auto memoryRequirements = device.getBufferMemoryRequirements(vertexBuffer);
+	const auto memoryProperties = physicalDevice.getMemoryProperties();
+	const auto indexedMemoryTypes = getEnumeration(memoryProperties.memoryTypes);
+	const auto isSuitable = [&](const auto& indexedMemoryType)
+	{
+		const auto& [memoryIndex, memoryType] = indexedMemoryType;
+		const auto memoryTypeBits = (1 << memoryIndex); // The type represented as bits, each type is counted as a power of 2 from 0
+		const auto hasRequiredMemoryType = memoryRequirements.memoryTypeBits & memoryTypeBits;
+		const auto hasRequiredMemoryProperty = memoryType.propertyFlags & (vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+		return hasRequiredMemoryType && hasRequiredMemoryProperty;
+	};
+	const auto iterIndexedMemoryTypes = std::ranges::find_if(indexedMemoryTypes, isSuitable);
+	if (iterIndexedMemoryTypes == indexedMemoryTypes.end()) throw std::runtime_error{"Failed to find suitable memory type"};
+	const auto memoryAllocateInfo = vk::MemoryAllocateInfo{
+		memoryRequirements.size
+		, std::get<0>(*iterIndexedMemoryTypes)
+	};
+	vertexBufferMemory = device.allocateMemory(memoryAllocateInfo);
+	// Bind the logical buffer to the allocated memory
+	device.bindBufferMemory(vertexBuffer, vertexBufferMemory, 0);
+	// Fill-in the allocated memory with buffer's data
+	void* memory = device.mapMemory(vertexBufferMemory, 0, bufferCreateInfo.size); // Map physical memory to logical memory
+	std::memcpy(memory, triangle.data(), bufferCreateInfo.size);
+	device.unmapMemory(vertexBufferMemory);
+
+	// Input Assembly
 	const auto inputAssemblyStateCreateInfo = vk::PipelineInputAssemblyStateCreateInfo{
 		{}
 		, vk::PrimitiveTopology::eTriangleList,
 	};
+
 	// Viewport
 	const auto viewport = vk::Viewport{
 		0.0f
@@ -467,6 +623,7 @@ void VulkanApplication::initGraphicPipeline()
 		, viewport
 		, scissor
 	};
+
 	// Rasterizer
 	const auto rasterizationStateCreateInfo = vk::PipelineRasterizationStateCreateInfo{
 		{}
@@ -481,14 +638,17 @@ void VulkanApplication::initGraphicPipeline()
 		, 0.0f
 		, 1.0f // fragment line thickness
 	};
+
 	// Multisampling for anti-aliasing
 	const auto multisampleStateCreateInfo = vk::PipelineMultisampleStateCreateInfo{
 		{}
 		, vk::SampleCountFlagBits::e1
 		, VK_FALSE
 	};
+
 	// Depth and stencil testing
 	const auto depthStencilStateCreateInfo = vk::PipelineDepthStencilStateCreateInfo{};
+
 	// Color blending, mix the fragment's color value with the value in the framebuffer (if already existed)
 	// Config per attached framebuffer
 	const auto colorBlendAttachmentState = vk::PipelineColorBlendAttachmentState{
@@ -504,6 +664,7 @@ void VulkanApplication::initGraphicPipeline()
 			| vk::ColorComponentFlagBits::eG
 			| vk::ColorComponentFlagBits::eA
 	};
+
 	// Global color blending settings
 	const auto colorBlendStateCreateInfo = vk::PipelineColorBlendStateCreateInfo{
 		{}
@@ -511,6 +672,7 @@ void VulkanApplication::initGraphicPipeline()
 		, vk::LogicOp::eCopy
 		, colorBlendAttachmentState
 	};
+
 	// --------- FIXED-STATES
 
 	// Dynamic state, used to modify a subset of options of the fixed states without recreating the pipeline
@@ -535,9 +697,9 @@ void VulkanApplication::initGraphicPipeline()
 		, &dynamicStateCreateInfo
 		, pipelineLayout
 		, renderPass
-		, 0 // Index of the subpass
-		// The next 2 params is used to create multiples pipelines with
-		// multiple pipeline create infos in one single call
+		, 0 // Index of the renderpass' subpass that will uses this pipeline
+		// The next 2 params is used to create new pipelines with multiple
+		// create infos in one single call
 	};
 	const auto resultValue = device.createGraphicsPipeline(VK_NULL_HANDLE, pipelineCreateInfo); // Can cache the pipeline in the VK_NULL_HANDLE argument
 	if (resultValue.result != vk::Result::eSuccess) throw std::runtime_error{ "Failed to create a graphic pipeline" };
@@ -548,20 +710,20 @@ void VulkanApplication::initGraphicPipeline()
 }
 void VulkanApplication::initFrameBuffer()
 {
-	swapchainFramebuffers.resize(swapchainImageViews.size());
+	framebuffers.resize(swapchainImageViews.size());
 	const auto toFramebuffer = [&](const vk::ImageView& imageView)
 	{
 		const auto framebufferCreateInfo = vk::FramebufferCreateInfo{
 			{}
 			, renderPass
-			, imageView
+			, imageView // Attachments
 			, surfaceExtent.width
 			, surfaceExtent.height
-			, 1 // single image, not doing stero-rendering
+			, 1 // Single layer, not doing stereo-rendering
 		};
 		return device.createFramebuffer(framebufferCreateInfo);
 	};
-	swapchainFramebuffers = swapchainImageViews | std::views::transform(toFramebuffer) | std::ranges::to<std::vector>();
+	framebuffers = swapchainImageViews | std::views::transform(toFramebuffer) | std::ranges::to<std::vector>();
 }
 void VulkanApplication::initCommandPool()
 {
@@ -584,29 +746,33 @@ void VulkanApplication::initCommandBuffer()
 }
 void VulkanApplication::recordCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex)
 {
+	commandBuffer.reset();
 	const auto commandBufferBeginInfo = vk::CommandBufferBeginInfo{};
 	commandBuffer.begin(commandBufferBeginInfo);
 	const auto clearColorValue = vk::ClearColorValue{0.0f, 0.0f, 0.0f, 1.0f}; // Color to clear the screen with
 	const auto clearValues = std::vector<vk::ClearValue>{clearColorValue};
 	const auto renderPassBeginInfo = vk::RenderPassBeginInfo{
 		renderPass
-		, swapchainFramebuffers[imageIndex]
+		, framebuffers[imageIndex]
 		, vk::Rect2D{{0, 0}, surfaceExtent}
 		, clearValues
 	};
 	commandBuffer.beginRenderPass(renderPassBeginInfo, vk::SubpassContents::eInline);
 	commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, graphicPipeline);
-	commandBuffer.draw(3, 1, 0, 0);
+	const auto bindingNumber = 0U;
+	const auto offsets = std::vector<vk::DeviceSize>{0};
+	commandBuffer.bindVertexBuffers(bindingNumber, vertexBuffer, offsets);
+	commandBuffer.draw(3U, 1U, 0U, 0U);
 	commandBuffer.endRenderPass();
 	commandBuffer.end();
 }
 void VulkanApplication::initSyncObjects()
 {
 	const auto semCreateInfo = vk::SemaphoreCreateInfo{};
-	const auto fenceCreateInfo = vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled}; // First frame doesn't have to wait for the unexisted previous framebuffer
-	isFramebufferPrepaired = device.createSemaphore(semCreateInfo);
-	isFramebufferRendered = device.createSemaphore(semCreateInfo);
-	isPreviousFramebufferPresented = device.createFence(fenceCreateInfo);
+	const auto fenceCreateInfo = vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled}; // First frame doesn't have to wait for the unexisted previous image
+	isPresentationEngineReadFinished = device.createSemaphore(semCreateInfo);
+	isImageRendered = device.createSemaphore(semCreateInfo);
+	isPreviousImagePresented = device.createFence(fenceCreateInfo);
 }
 
 void VulkanApplication::initVulkan()
@@ -645,21 +811,21 @@ void VulkanApplication::mainLoop()
 void VulkanApplication::drawFrame()
 {
 	// Get framebufer
-	std::ignore = device.waitForFences(isPreviousFramebufferPresented, VK_TRUE, UINT64_MAX); // Block until fences is signaled
-	device.resetFences(isPreviousFramebufferPresented);
-	const auto resultValue = device.acquireNextImageKHR(swapchain, UINT64_MAX, isFramebufferPrepaired, VK_NULL_HANDLE);
-	// Record and submit commandbuffer for that framebuffer
+	std::ignore = device.waitForFences(isPreviousImagePresented, VK_TRUE, UINT64_MAX); // Block until fences is signaled
+	device.resetFences(isPreviousImagePresented);
+	const auto resultValue = device.acquireNextImageKHR(swapchain, UINT64_MAX, isPresentationEngineReadFinished, VK_NULL_HANDLE);
+
+	// Record and submit commandbuffer for that image
 	const auto imageIndex = resultValue.value;
 	auto& commandBuffer = commandBuffers.front();
-	commandBuffer.reset();
 	recordCommandBuffer(commandBuffer, imageIndex);
-	const auto toPipelineStageFlags = [](const vk::PipelineStageFlagBits& bit){ return static_cast<vk::PipelineStageFlags>(bit); };
-	const auto stages = std::vector{vk::PipelineStageFlagBits::eColorAttachmentOutput};
-	const auto waitStages = stages | std::views::transform(toPipelineStageFlags) | std::ranges::to<std::vector>(); 
-	auto submitInfo = vk::SubmitInfo{isFramebufferPrepaired, waitStages, commandBuffer, isFramebufferRendered};
-	queue.submit(submitInfo, isPreviousFramebufferPresented);
+	const auto stages = {vk::PipelineStageFlagBits::eColorAttachmentOutput};
+	const auto waitStages = stages | std::ranges::to<std::vector<vk::PipelineStageFlags>>(); 
+	auto submitInfo = vk::SubmitInfo{isPresentationEngineReadFinished, waitStages, commandBuffer, isImageRendered};
+	queue.submit(submitInfo, isPreviousImagePresented);
+
 	// Present
-	const auto presentInfo = vk::PresentInfoKHR{isFramebufferRendered, swapchain, imageIndex};
+	const auto presentInfo = vk::PresentInfoKHR{isImageRendered, swapchain, imageIndex};
 	std::ignore = queue.presentKHR(presentInfo);
 }
 
