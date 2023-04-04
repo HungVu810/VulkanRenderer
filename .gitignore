@@ -1,2 +1,5 @@
-./Build/
-./.vs/
+Build/
+.vs/
+Dependencies/VulkanSDK/
+!Dependencies/VulkanSDK/Bin/glslc.exe
+!Dependencies/VulkanSDK/Include/vulkan/
