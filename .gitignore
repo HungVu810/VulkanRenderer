@@ -1,23 +1,33 @@
 Build/*
 .vs/*
 
-Dependencies/VulkanSDK/components.xml
-Dependencies/VulkanSDK/Config/*
-Dependencies/VulkanSDK/Demos/*
-Dependencies/VulkanSDK/Helpers/*
-Dependencies/VulkanSDK/InstallationLog.txt
-Dependencies/VulkanSDK/installer.dat
-Dependencies/VulkanSDK/installerResources/*
-Dependencies/VulkanSDK/Lib/*
-Dependencies/VulkanSDK/Licenses/*
-Dependencies/VulkanSDK/maintenancetool.*
-Dependencies/VulkanSDK/network.xml
-Dependencies/VulkanSDK/readme.txt
-Dependencies/VulkanSDK/share/*
-Dependencies/VulkanSDK/Source/*
-Dependencies/VulkanSDK/Templates/*
+# Dependencies/VulkanSDK/components.xml
+# Dependencies/VulkanSDK/Config/*
+# Dependencies/VulkanSDK/Demos/*
+# Dependencies/VulkanSDK/Helpers/*
+# Dependencies/VulkanSDK/InstallationLog.txt
+# Dependencies/VulkanSDK/installer.dat
+# Dependencies/VulkanSDK/installerResources/*
+# Dependencies/VulkanSDK/Lib/*
+# Dependencies/VulkanSDK/Licenses/*
+# Dependencies/VulkanSDK/maintenancetool.*
+# Dependencies/VulkanSDK/network.xml
+# Dependencies/VulkanSDK/readme.txt
+# Dependencies/VulkanSDK/share/*
+# Dependencies/VulkanSDK/Source/*
+# Dependencies/VulkanSDK/Templates/*
 
+Dependencies/VulkanSDK/*
+
+!Dependencies/VulkanSDK/Bin/
 Dependencies/VulkanSDK/Bin/*
-Dependencies/VulkanSDK/Include/*
 !Dependencies/VulkanSDK/Bin/glslc.exe
-!Dependencies/VulkanSDK/Include/vulkan
+
+!Dependencies/VulkanSDK/Include/
+Dependencies/VulkanSDK/Include/*
+!Dependencies/VulkanSDK/Include/vulkan/
+
+# Dependencies/VulkanSDK/Bin/*
+# Dependencies/VulkanSDK/Include/*
+# !Dependencies/VulkanSDK/Bin/glslc.exe
+# !Dependencies/VulkanSDK/Include/vulkan
