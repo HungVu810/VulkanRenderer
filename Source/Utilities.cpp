@@ -1,7 +1,7 @@
 #pragma once
 #include <cryptopp/sha.h>
 #include <cryptopp/hex.h>
-#include "Helper.h"
+#include "Utilities.h"
 
 [[nodiscard]] std::string getChecksum(const std::filesystem::path& path)
 {

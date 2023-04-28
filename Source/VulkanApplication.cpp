@@ -6,14 +6,20 @@
 #include "VulkanApplication.h" // Do not place this right above the VULKAN_HPP_DEFAULT macro
 #include "Geometry.h"
 #include "Shader.h"
+#include "Utilities.h"
+#include "Allocation.h"
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
+
+// Volume data extraction
+#include <fstream>
+#include <filesystem>
+#include <iostream>
+#include <vector>
+#include <span>
+#include <cassert>
 
 namespace
 {
-	using QueueFamilyIndex = uint32_t;
-	using QueuesPriorities = std::vector<float>;
-	using QueueFamily = std::pair<QueueFamilyIndex, QueuesPriorities>;
-
 	// Classes/Structs
 	struct SurfaceAttributes
 	{
@@ -33,7 +39,7 @@ namespace
 	{
 		auto strings = std::vector<std::string>{};
 		if (!isValidationLayersEnabled) return strings;
-		const auto validationLayerName = std::string{ "VK_LAYER_KHRONOS_validation" };
+		const auto validationLayerName = std::string{"VK_LAYER_KHRONOS_validation"};
 		const auto layersProperties = vk::enumerateInstanceLayerProperties();
 		const auto getLayerName = [](const vk::LayerProperties& layerProperties) { return std::string_view(layerProperties.layerName); };
 		const auto layersName = layersProperties | std::views::transform(getLayerName);
@@ -139,14 +145,53 @@ namespace
 		auto queueFamilies = queueFamiliesIndex | std::views::filter(isSuitable) | std::views::transform(toQueueFamily) | std::ranges::to<std::vector>();
 		return queueFamilies;
 	}
-	[[nodiscard]] inline auto getEnumeration(const auto& container)
+	[[nodiscard]] auto getSuitableQueueFamiliesIndex(const vk::PhysicalDevice& physicalDevice, vk::SurfaceKHR& surface)
 	{
-		return std::views::zip(std::views::iota(0U, container.size()), container);
+		const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
+		const auto toQueueFamilyIndex = [](const QueueFamily& queueFamily){return queueFamily.first;};
+		const auto queueFamiliesIndex = queueFamilies | std::views::transform(toQueueFamilyIndex) | std::ranges::to<std::vector>();
+		return queueFamiliesIndex;
 	}
+
+	// TODO: Volume data extraction, only needed by the shader?
+	[[nodiscard]] inline auto getIntensity(std::span<Intensity, NUM_INTENSITY> slides, int z, int y, int x)
+	{
+		return slides[(z * SLIDE_HEIGHT * SLIDE_WIDTH) + (y * SLIDE_WIDTH) + x];
+	}
+	void setVolumeData(std::vector<Intensity>& intensities)
+	{
+		// TODO: intensities(NUM_INTENSITY), allocate upfront
+		for (int i = 1; i <= NUM_SLIDES; i++)
+		{
+			const auto path = std::filesystem::path{VOLUME_DATA"/CThead." + std::to_string(i)};
+			auto ctFile = std::ifstream{path, std::ios_base::binary};
+			if (!ctFile) throw std::runtime_error{"Can't open file at " + path.string()};
+
+			auto intensity = uint16_t{0};
+			while (ctFile.read(reinterpret_cast<char*>(&intensity), sizeof(intensity)))
+			{
+				// Swap byte order if running on little-endian system
+				#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+					data = (data >> 8) | (data << 8);
+				#endif
+				intensities.push_back(intensity);
+			}
+		}
+		assert(intensities.size() == NUM_INTENSITY); // Sanity check
+	}
+	//auto getRaycastViewportImage(uint32_t width, uint32_t height)
+	//{
+	//	// TODO: use cartesian product instead
+	//	const auto widthIndices = std::views::iota(0U, WIDTH);
+	//	const auto heightIndices = std::views::iota(0U, WIDTH);
+	//}
 }
 
 VulkanApplication::VulkanApplication()
-	: window{nullptr}
+	: importVolumeDataWorker{}
+	, intensities{}
+
+	, window{nullptr}
 	, validateShadersWorker{}
 	, instance{}
 	, debugMessengerCreateInfo{
@@ -175,19 +220,20 @@ VulkanApplication::VulkanApplication()
 	, framebuffers{}
 	, commandPool{}
 	, commandBuffers{}
-	, isPresentationEngineReadFinished{}
+	, isAcquiredImageRead{}
 	, isImageRendered{}
-	, isPreviousImagePresented{}
+	, isCommandBufferExecuted{}
 {
 }
 
-VulkanApplication::~VulkanApplication(){}
+VulkanApplication::~VulkanApplication() noexcept {}
 
 void VulkanApplication::run() noexcept
 {
 	try
 	{
 		validateShadersWorker = std::thread{validateShaders, std::ref(shaderMap)};
+		importVolumeDataWorker = std::thread{setVolumeData, std::ref(intensities)};
 		initWindow(); // Must be before initVulkan()
 		initVulkan();
 		mainLoop();
@@ -204,7 +250,7 @@ void VulkanApplication::initWindow()
 	if (glfwInit() != GLFW_TRUE) throw std::runtime_error{ "Failed to initalize GLFW" };
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Do not create an OpenGL context
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-	window = glfwCreateWindow(width, height, "MyWindow", nullptr, nullptr);
+	window = glfwCreateWindow(WIDTH, HEIGHT, "MyWindow", nullptr, nullptr);
 	if (!window) throw std::runtime_error{ "Can't create window" };
 }
 
@@ -380,9 +426,10 @@ void VulkanApplication::initRenderPass()
 void VulkanApplication::initGraphicPipeline()
 {
 	validateShadersWorker.join();
+
 	// Vertex shader stage
-	const auto vertexShaderBinary = shaderMap.find("General.vert")->second.getBinaryData();
-	const auto vertexShaderModuleCreateInfo = vk::ShaderModuleCreateInfo{{}, vertexShaderBinary.size(), (uint32_t*)(vertexShaderBinary.data())};
+	const auto vertexShaderBinaryData = getShaderBinaryData(shaderMap, "General.vert");
+	const auto vertexShaderModuleCreateInfo = vk::ShaderModuleCreateInfo{{}, vertexShaderBinaryData};
 	const auto vertexShaderModule = device.createShaderModule(vertexShaderModuleCreateInfo);
 	const auto vertexShaderStageCreateInfo = vk::PipelineShaderStageCreateInfo{
 		{}
@@ -391,9 +438,9 @@ void VulkanApplication::initGraphicPipeline()
 		, "main" // entry point
 	};
 	// Fragment shader stage
-	const auto fragmentShaderBinary = shaderMap.find("General.frag")->second.getBinaryData();
-	const auto fragmentCreateInfo = vk::ShaderModuleCreateInfo{{}, fragmentShaderBinary.size(), (uint32_t*)(fragmentShaderBinary.data())};
-	const auto fragmentShaderModule = device.createShaderModule(fragmentCreateInfo);
+	const auto fragmentShaderBinaryData = getShaderBinaryData(shaderMap, "General.frag");
+	const auto fragmentShaderModuleCreateInfo = vk::ShaderModuleCreateInfo{{}, fragmentShaderBinaryData};
+	const auto fragmentShaderModule = device.createShaderModule(fragmentShaderModuleCreateInfo);
 	const auto fragmentShaderStageCreateInfo = vk::PipelineShaderStageCreateInfo{
 		{}
 		, vk::ShaderStageFlagBits::eFragment
@@ -415,7 +462,6 @@ void VulkanApplication::initGraphicPipeline()
 		, {{-0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}}
 		, {{0.0f, -0.5f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}}
 	};
-	//const auto totalBytesSize = triangle.size() * sizeof(Vertex);
 	// Vertex input state
 	const auto vertexInputBindingDescription = vk::VertexInputBindingDescription{
 		bindingNumber
@@ -426,45 +472,26 @@ void VulkanApplication::initGraphicPipeline()
 		 , {1, bindingNumber, format::vec3, offsetof(Vertex, normal)}
 		 , {2, bindingNumber, format::vec3, offsetof(Vertex, color)}
 	};
+
 	const auto vertexInputStateCreateInfo = vk::PipelineVertexInputStateCreateInfo{
 		{}
 		, vertexInputBindingDescription
 		, vertexInputAttributeDescription
 	};
-	// Logical buffer
-	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
-	const auto toQueueFamilyIndex = [](const QueueFamily& queueFamily){return queueFamily.first;};
-	const auto queueFamiliesIndex = queueFamilies | std::views::transform(toQueueFamilyIndex) | std::ranges::to<std::vector>();
+
+	const auto queueFamiliesIndex = getSuitableQueueFamiliesIndex(physicalDevice, surface);
 	const auto bufferCreateInfo = vk::BufferCreateInfo{
 		{}
 		, triangle.size() * sizeof(Vertex)
 		, vk::BufferUsageFlagBits::eVertexBuffer
 		, vk::SharingMode::eExclusive
 		, queueFamiliesIndex
+
 	};
 	vertexBuffer = device.createBuffer(bufferCreateInfo);
-	// Physical memory allocation for the logical buffer
 	const auto memoryRequirements = device.getBufferMemoryRequirements(vertexBuffer);
-	const auto memoryProperties = physicalDevice.getMemoryProperties();
-	const auto indexedMemoryTypes = getEnumeration(memoryProperties.memoryTypes);
-	const auto isSuitable = [&](const auto& indexedMemoryType)
-	{
-		const auto& [memoryIndex, memoryType] = indexedMemoryType;
-		const auto memoryTypeBits = (1 << memoryIndex); // The type represented as bits, each type is counted as a power of 2 from 0
-		const auto hasRequiredMemoryType = memoryRequirements.memoryTypeBits & memoryTypeBits;
-		const auto hasRequiredMemoryProperty = memoryType.propertyFlags & (vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
-		return hasRequiredMemoryType && hasRequiredMemoryProperty;
-	};
-	const auto iterIndexedMemoryTypes = std::ranges::find_if(indexedMemoryTypes, isSuitable);
-	if (iterIndexedMemoryTypes == indexedMemoryTypes.end()) throw std::runtime_error{"Failed to find suitable memory type"};
-	const auto memoryAllocateInfo = vk::MemoryAllocateInfo{
-		memoryRequirements.size
-		, std::get<0>(*iterIndexedMemoryTypes)
-	};
-	vertexBufferMemory = device.allocateMemory(memoryAllocateInfo);
-	// Bind the logical buffer to the allocated memory
+	vertexBufferMemory = allocateMemory(device, physicalDevice, memoryRequirements);
 	device.bindBufferMemory(vertexBuffer, vertexBufferMemory, 0);
-	// Fill-in the allocated memory with buffer's data
 	void* memory = device.mapMemory(vertexBufferMemory, 0, bufferCreateInfo.size); // Map physical memory to logical memory
 	std::memcpy(memory, triangle.data(), bufferCreateInfo.size);
 	device.unmapMemory(vertexBufferMemory);
@@ -545,7 +572,7 @@ void VulkanApplication::initGraphicPipeline()
 	// Dynamic state, used to modify a subset of options of the fixed states without recreating the pipeline
 	const auto dynamicStateCreateInfo = vk::PipelineDynamicStateCreateInfo{};
 
-	// Pipeline layout, for assigning uniform values to shaders
+	// Assigning uniform values to shaders
 	const auto pipelineLayoutCreateInfo = vk::PipelineLayoutCreateInfo{};
 	pipelineLayout = device.createPipelineLayout(pipelineLayoutCreateInfo);
 
@@ -575,6 +602,90 @@ void VulkanApplication::initGraphicPipeline()
 	device.destroyShaderModule(vertexShaderModule);
 	device.destroyShaderModule(fragmentShaderModule);
 }
+
+void VulkanApplication::initComputePipeline()
+{
+	importVolumeDataWorker.join();
+
+	const auto volumeShaderBinaryData = getShaderBinaryData(shaderMap, "VolumeRendering.comp");
+	const auto volumeShaderModuleCreateInfo = vk::ShaderModuleCreateInfo{{}, volumeShaderBinaryData};
+	const auto volumeShaderModule = device.createShaderModule(volumeShaderModuleCreateInfo);
+	const auto computeShaderStageCreateInfo = vk::PipelineShaderStageCreateInfo{
+		{}
+		, vk::ShaderStageFlagBits::eCompute
+		, volumeShaderModule
+		, "main"
+	};
+
+	const auto raycastedImageCreateInfo = vk::ImageCreateInfo{
+		{}
+		, vk::ImageType::e2D
+		, surfaceFormat.format
+		, vk::Extent3D{surfaceExtent.width, surfaceExtent.height, 1}
+		, 1 // The only mip level for this image
+		, 1 // Single layer, no stereo-rendering
+		, vk::SampleCountFlagBits::e1 // One sample, no multisampling
+		, vk::ImageTiling::eOptimal
+		, vk::ImageUsageFlagBits::eColorAttachment
+		, vk::SharingMode::eExclusive
+		, getSuitableQueueFamilies(physicalDevice, surface).front().first
+	};
+	const auto raycastedImage = device.createImage(raycastedImageCreateInfo);
+	const auto raycastedImageMemoryRequirements = device.getImageMemoryRequirements(raycastedImage);
+	const auto raycastedImageMemory = allocateMemory(device, physicalDevice, raycastedImageMemoryRequirements);
+	device.bindImageMemory(raycastedImage, raycastedImageMemory, 0);
+	const auto raycastedImageViewCreateInfo = vk::ImageViewCreateInfo{
+		{}
+		, raycastedImage
+		, vk::ImageViewType::e2D
+		, surfaceFormat.format
+	};
+	const auto raycastedImageView = device.createImageView(raycastedImageViewCreateInfo);
+	// TODO: attach this imageview to the framebuffer, and renderpass so we can modifies it in the compute shader
+	// TODO: or make it available via descriptor set?
+	// TODO; the 3D volumn data has to be inn a descriptor set
+
+	// const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
+	// createBuffer(device, intensities, queueFamilies, vk::BufferUsageFlagBits::)
+
+	// storage image descriptor (for the image to be ray casted)
+	// 3D texture sampled descriptor (for the 3D volume data)
+	// run the compute shader in parallel each pixel, instead of going through each of them one by one
+
+	//// TODO: upload the 3D volume texture data via the descriptor set
+	//// TODO: generate image grid?
+	//// TODO: Bound the descripor sets when record the command buffer
+
+	// TODO: how to present the image in the compute shader after finished ray castingn?
+
+	//const auto numDescriptorSet = 1;
+	//const auto descriptorPoolSize = vk::DescriptorPoolSize{vk::DescriptorType::};
+	//vk::DescriptorPoolCreateInfo{vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet, }
+	//// device.createDescriptorPool()
+	//// vk::DescriptorSetAllocateInfo{}
+	//// device.allocateDescriptorSets()
+
+	//const auto descriptorSetLayoutBinding = vk::DescriptorSetLayoutBinding{
+	//	0
+	//	, vk::DescriptorType::eStorageImage
+	//	// , vk::ShaderStageFlagBits::eCompute
+	//};
+	//const auto descriptorSetLayoutCreateInfo = vk::DescriptorSetLayoutCreateInfo{{}, descriptorSetLayoutBinding};
+	//const auto descriptorSetLayout = device.createDescriptorSetLayout(descriptorSetLayoutCreateInfo);
+
+	//const auto pipelineLayoutCreateInfo = vk::PipelineLayoutCreateInfo{{}, descriptorSetLayout};
+	//const auto pipelineLayout = device.createPipelineLayout(pipelineLayoutCreateInfo);
+
+	////const auto computePipelineCreateInfo = vk::ComputePipelineCreateInfo{};
+	////const auto computePipeline = device.createComputePipeline({}, computePipelineCreateInfo);
+
+	//device.destroyPipeline();
+	device.destroyImageView(raycastedImageView);
+	device.destroyImage(raycastedImage);
+	device.destroyDescriptorSetLayout(); // but this in the cleanUp();
+	device.destroyShaderModule(volumeShaderModule);
+}
+
 void VulkanApplication::initFrameBuffer()
 {
 	framebuffers.resize(swapchainImageViews.size());
@@ -611,6 +722,51 @@ void VulkanApplication::initCommandBuffer()
 	// Command buffers are allocated from the command pool
 	commandBuffers = device.allocateCommandBuffers(allocateInfo);
 }
+void VulkanApplication::initSyncObjects()
+{
+	const auto semCreateInfo = vk::SemaphoreCreateInfo{};
+	const auto fenceCreateInfo = vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled}; // First frame doesn't have to wait for the unexisted previous image
+	isAcquiredImageRead = device.createSemaphore(semCreateInfo);
+	isImageRendered = device.createSemaphore(semCreateInfo);
+	isCommandBufferExecuted = device.createFence(fenceCreateInfo);
+}
+
+void VulkanApplication::initVulkan()
+{
+	if (glfwVulkanSupported() != GLFW_TRUE) throw std::runtime_error{"Vulkan is not supported"};
+	initDispatcher();
+	initInstance();
+	VULKAN_HPP_DEFAULT_DISPATCHER.init(instance); // Extend dispatcher to support instance dependent EXT function pointers
+	initDebugMessenger();
+	initSurface();
+	initPhysicalDevice();
+	initDevice();
+	VULKAN_HPP_DEFAULT_DISPATCHER.init(device); // Extend dispatcher to device dependent EXT function pointers
+	initQueue();
+	initSwapChain();
+	initImageViews();
+	initRenderPass();
+
+	initGraphicPipeline();
+	initComputePipeline();
+
+	initFrameBuffer();
+	initCommandPool();
+	initCommandBuffer();
+	initSyncObjects();
+}
+
+void VulkanApplication::mainLoop()
+{
+	while (!glfwWindowShouldClose(window))
+	{
+		glfwPollEvents();
+		drawFrame();
+	}
+
+	device.waitIdle();
+}
+
 void VulkanApplication::recordCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex)
 {
 	commandBuffer.reset();
@@ -633,54 +789,12 @@ void VulkanApplication::recordCommandBuffer(vk::CommandBuffer& commandBuffer, ui
 	commandBuffer.endRenderPass();
 	commandBuffer.end();
 }
-void VulkanApplication::initSyncObjects()
-{
-	const auto semCreateInfo = vk::SemaphoreCreateInfo{};
-	const auto fenceCreateInfo = vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled}; // First frame doesn't have to wait for the unexisted previous image
-	isPresentationEngineReadFinished = device.createSemaphore(semCreateInfo);
-	isImageRendered = device.createSemaphore(semCreateInfo);
-	isPreviousImagePresented = device.createFence(fenceCreateInfo);
-}
-
-void VulkanApplication::initVulkan()
-{
-	if (glfwVulkanSupported() != GLFW_TRUE) throw std::runtime_error{"Vulkan is not supported"};
-	initDispatcher();
-	initInstance();
-	VULKAN_HPP_DEFAULT_DISPATCHER.init(instance); // Extend dispatcher to support instance dependent EXT function pointers
-	initDebugMessenger();
-	initSurface();
-	initPhysicalDevice();
-	initDevice();
-	VULKAN_HPP_DEFAULT_DISPATCHER.init(device); // Extend dispatcher to device dependent EXT function pointers
-	initQueue();
-	initSwapChain();
-	initImageViews();
-	initRenderPass();
-	initGraphicPipeline();
-	initFrameBuffer();
-	initCommandPool();
-	initCommandBuffer();
-	initSyncObjects();
-}
-
-void VulkanApplication::mainLoop()
-{
-	while (!glfwWindowShouldClose(window))
-	{
-		glfwPollEvents();
-		drawFrame();
-	}
-
-	device.waitIdle();
-}
-
 void VulkanApplication::drawFrame()
 {
-	// Get framebufer
-	std::ignore = device.waitForFences(isPreviousImagePresented, VK_TRUE, UINT64_MAX); // Block until fences is signaled
-	device.resetFences(isPreviousImagePresented);
-	const auto resultValue = device.acquireNextImageKHR(swapchain, UINT64_MAX, isPresentationEngineReadFinished, VK_NULL_HANDLE);
+	// Get swapchain image
+	std::ignore = device.waitForFences(isCommandBufferExecuted, VK_TRUE, UINT64_MAX);
+	device.resetFences(isCommandBufferExecuted);
+	const auto resultValue = device.acquireNextImageKHR(swapchain, UINT64_MAX, isAcquiredImageRead, VK_NULL_HANDLE);
 
 	// Record and submit commandbuffer for that image
 	const auto imageIndex = resultValue.value;
@@ -688,8 +802,8 @@ void VulkanApplication::drawFrame()
 	recordCommandBuffer(commandBuffer, imageIndex);
 	const auto stages = {vk::PipelineStageFlagBits::eColorAttachmentOutput};
 	const auto waitStages = stages | std::ranges::to<std::vector<vk::PipelineStageFlags>>(); 
-	auto submitInfo = vk::SubmitInfo{isPresentationEngineReadFinished, waitStages, commandBuffer, isImageRendered};
-	queue.submit(submitInfo, isPreviousImagePresented);
+	auto submitInfo = vk::SubmitInfo{isAcquiredImageRead, waitStages, commandBuffer, isImageRendered};
+	queue.submit(submitInfo, isCommandBufferExecuted);
 
 	// Present
 	const auto presentInfo = vk::PresentInfoKHR{isImageRendered, swapchain, imageIndex};
@@ -699,9 +813,9 @@ void VulkanApplication::drawFrame()
 void VulkanApplication::cleanUp()
 {
 	// Destroy the objects in reverse order of their creation order
-	device.destroy(isPresentationEngineReadFinished);
+	device.destroy(isAcquiredImageRead);
 	device.destroy(isImageRendered);
-	device.destroy(isPreviousImagePresented);
+	device.destroy(isCommandBufferExecuted);
 	device.destroyCommandPool(commandPool);
 	for (const vk::Framebuffer& framebuffer : framebuffers) device.destroyFramebuffer(framebuffer);
 	device.destroyPipeline(graphicPipeline);

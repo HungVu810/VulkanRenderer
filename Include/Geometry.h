@@ -2,11 +2,12 @@
 #include <vulkan/vulkan.hpp>
 #include <glm/glm.hpp>
 #include <vector>
+#include <optional>
 #include <array>
 
 namespace format
 {
-	constexpr auto floatType = vk::Format::eR32Sfloat;
+	constexpr auto vec1 = vk::Format::eR32Sfloat;
 	constexpr auto vec2 = vk::Format::eR32G32Sfloat;
 	constexpr auto vec3 = vk::Format::eR32G32B32Sfloat;
 	constexpr auto vec4 = vk::Format::eR32G32B32A32Sfloat;
@@ -21,17 +22,42 @@ struct Vertex
 	// glm::vec2 textcoord;
 };
 
-// each model's mesh are drawn independantly since drawing the whole model messed up the texture
-struct Mesh{
-	// store continous vertices data. position (3), normal (3), texcoord(2) per vertex
-	std::vector<Vertex> vertices;
-	//// ebo buffer, stores continous faces indicies. 3 indices per face
-	//std::vector<unsigned> ebuf;
-	//// textures for this mesh
-	//std::vector<std::shared_ptr<gl_texture>> material;
-	//// shininess level for the mesh's phong-specularity calculation
-	//float shininess = -1.0f;
+class VertexBuffer{
+public:
+	VertexBuffer(std::vector<Vertex> inVertices, std::optional<std::vector<uint32_t>> inElementBuffer = std::nullopt)
+		: bindingNumber{-1}
+		, vertices{inVertices}
+		, elementBuffer{inElementBuffer}
+		, buffer{}
+		, memory{}
+	{}
+
+	~VertexBuffer()
+	{
+
+	}
+
+private:
+	int bindingNumber; // The binding number for this vertex buffer
+	std::vector<Vertex> vertices; // Stored on the CPU. The data should be a continuous stream of attributes for cache-locality.
+	std::optional<std::vector<uint32_t>> elementBuffer; // Stores faces' indicies. 3 indices per face
+
+	vk::Device device; // Logical device from Vulkan Application
+	vk::Buffer buffer; // Logical buffer on the logical device
+	vk::DeviceMemory memory; // Allocated memory from the physical device by for the buffer
 };
+
+// Each model's mesh are drawn independantly since drawing the whole model messed up the texture
+//class Mesh
+//{
+//	// vertex buffer
+//
+//	//// textures for this mesh
+//	//std::vector<std::shared_ptr<gl_texture>> material;
+//
+//	//// shininess level for the mesh's phong-specularity calculation
+//	//float shininess = -1.0f;
+//};
 
 class GeometryFactory
 {
@@ -41,3 +67,5 @@ class GeometryFactory
 	// common scenes (castle, standford room)
 	// common props (bunny, teapot,..)
 };
+
+

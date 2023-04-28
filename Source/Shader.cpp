@@ -3,8 +3,9 @@
 #include <unordered_map>
 #include <string>
 #include <vulkan/vulkan.hpp>
-#include "Prompt.h"
-#include "Helper.h"
+#include <vector>
+#include <span>
+#include "Utilities.h"
 #include "Shader.h"
 
 namespace
@@ -116,14 +117,16 @@ Shader::Shader(std::string_view shaderFileName) : path{getShaderPath(shaderFileN
 
 Shader::~Shader(){};
 
-[[nodiscard]] std::vector<char> Shader::getBinaryData() const
+[[nodiscard]] std::vector<uint32_t> Shader::getBinaryData() const
 {
 	const auto binaryPath = getShaderBinaryPath(path);
 	if (!std::filesystem::exists(binaryPath)) throw std::runtime_error{std::string{"Attempting to reference a non-existed shader binary at "} + path.string()};
 	auto binaryFile = std::ifstream{binaryPath, std::ios::binary};
-	auto bindaryData = std::vector<char>(std::filesystem::file_size(binaryPath));
-	binaryFile.read(bindaryData.data(), bindaryData.size());
-	return bindaryData;
+	auto binaryData = std::vector<char>(std::filesystem::file_size(binaryPath));
+	binaryFile.read(binaryData.data(), binaryData.size());
+	// Reinterpreted to uint32_t aka 4 chars per uint32_t
+	const auto vulkanBinaryData = std::span<uint32_t>{(uint32_t*)binaryData.data(), binaryData.size() / sizeof(uint32_t)};
+	return std::vector<uint32_t>(vulkanBinaryData.begin(), vulkanBinaryData.end());
 }
 
 [[nodiscard]] vk::ShaderStageFlagBits Shader::getStage() const noexcept
