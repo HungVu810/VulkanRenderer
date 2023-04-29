@@ -24,7 +24,7 @@ constexpr auto HEIGHT = uint32_t{600};
 constexpr auto NUM_SLIDES = 113;
 constexpr auto SLIDE_HEIGHT = 256;
 constexpr auto SLIDE_WIDTH = 256;
-constexpr auto NUM_INTENSITY = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
+constexpr auto NUM_INTENSITES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
 
 namespace
 {
@@ -58,9 +58,17 @@ private:
 	void initQueue();
 	void initSwapChain();
 	void initImageViews();
+
+// ********* Default
 	void initRenderPass();
 	void initGraphicPipeline();
+// ********* Default
+
+// ********* Volume Rendering
+	void initVolumeRenderPass();
 	void initComputePipeline();
+// ********* Volume Rendering
+
 	void initVulkan();
 	void initFrameBuffer();
 	void initCommandPool();
