@@ -16,16 +16,6 @@
 	const bool isValidationLayersEnabled = true;
 #endif
 
-constexpr auto WIDTH = uint32_t{800};
-constexpr auto HEIGHT = uint32_t{600};
-// constexpr auto MAX_INFLIGHT_IMAGES = 2; // The swapchain support at least 2 presentable images
-
-// Volume data specification
-constexpr auto NUM_SLIDES = 113;
-constexpr auto SLIDE_HEIGHT = 256;
-constexpr auto SLIDE_WIDTH = 256;
-constexpr auto NUM_INTENSITES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
-
 namespace
 {
 	using Intensity = uint16_t;
@@ -34,6 +24,17 @@ namespace
 	using QueuesPriorities = std::vector<float>;
 	using QueueFamily = std::pair<QueueFamilyIndex, QueuesPriorities>;
 }
+
+constexpr auto WIDTH = uint32_t{800};
+constexpr auto HEIGHT = uint32_t{600};
+// constexpr auto MAX_INFLIGHT_IMAGES = 2; // The swapchain support at least 2 presentable images
+
+// Volume data specification
+constexpr auto NUM_SLIDES = 113;
+constexpr auto SLIDE_HEIGHT = 256;
+constexpr auto SLIDE_WIDTH = 256;
+constexpr auto NUM_INTENSITIES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
+constexpr auto TOTAL_SCAN_BYTES = NUM_INTENSITIES * sizeof(Intensity); // format type is format::Short, used for image/imageView creation
 
 class VulkanApplication
 {
@@ -58,18 +59,19 @@ private:
 	void initQueue();
 	void initSwapChain();
 	void initImageViews();
-
 // ********* Default
 	void initRenderPass();
 	void initGraphicPipeline();
 // ********* Default
-
 // ********* Volume Rendering
 	void initVolumeRenderPass();
 	void initComputePipeline();
+	void recordVolumeCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex);
+	void drawVolumeFrame();
+	void transferStagingBufferToVolumeImage();
 // ********* Volume Rendering
-
 	void initVulkan();
+
 	void initFrameBuffer();
 	void initCommandPool();
 	void initCommandBuffer();
@@ -98,8 +100,20 @@ private:
 	}
 
 private:
+// ********* Volume Rendering
 	std::thread importVolumeDataWorker;
 	std::vector<Intensity> intensities; // z-y-x order, contains CT slides
+	vk::Pipeline computePipeline;
+	vk::PipelineLayout computePipelineLayout;
+	vk::ShaderModule volumeShaderModule;
+	vk::DescriptorSetLayout descriptorSetLayout;
+	vk::Sampler sampler;
+	vk::DescriptorPool descriptorPool;
+	vk::Buffer stagingBuffer; vk::DeviceMemory stagingBufferMemory;
+	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory;
+	vk::ImageView volumeImageView;
+	vk::RenderPass volumeRenderPass;
+// ********* Volume Rendering
 
 	GLFWwindow* window;
 	std::unordered_map<std::string, Shader> shaderMap;

@@ -1,4 +1,5 @@
 #pragma once
+#include "vulkan/vulkan.hpp"
 #include <filesystem>
 #include <fstream>
 #include <cassert>
@@ -12,6 +13,24 @@ namespace tag
 	constexpr auto exception = std::string_view{  "[[--EXCEPTION--]] " };
 	constexpr auto error     = std::string_view{  "[[----ERROR----]] " };
 	constexpr auto validation = std::string_view{ "[[  VALIDATES  ]] " };
+}
+
+namespace color
+{
+	constexpr auto white = vk::ClearColorValue{1.0f, 1.0f, 1.0f, 1.0f};
+	constexpr auto black = vk::ClearColorValue{0.0f, 0.0f, 0.0f, 1.0f};
+	constexpr auto red   = vk::ClearColorValue{1.0f, 0.0f, 0.0f, 1.0f};
+	constexpr auto green = vk::ClearColorValue{0.0f, 1.0f, 0.0f, 1.0f};
+	constexpr auto blue  = vk::ClearColorValue{0.0f, 0.0f, 1.0f, 1.0f};
+}
+
+namespace format
+{
+	constexpr auto FLoat = vk::Format::eR32Sfloat;
+	constexpr auto Short = vk::Format::eR16Uint;
+	constexpr auto vec2 = vk::Format::eR32G32Sfloat;
+	constexpr auto vec3 = vk::Format::eR32G32B32Sfloat;
+	constexpr auto vec4 = vk::Format::eR32G32B32A32Sfloat;
 }
 
 // inlines/constexpr healpers

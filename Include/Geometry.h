@@ -4,14 +4,7 @@
 #include <vector>
 #include <optional>
 #include <array>
-
-namespace format
-{
-	constexpr auto vec1 = vk::Format::eR32Sfloat;
-	constexpr auto vec2 = vk::Format::eR32G32Sfloat;
-	constexpr auto vec3 = vk::Format::eR32G32B32Sfloat;
-	constexpr auto vec4 = vk::Format::eR32G32B32A32Sfloat;
-}
+#include "Utilities.h"
 
 struct Vertex
 {
