@@ -26,7 +26,7 @@ namespace
 }
 
 constexpr auto WIDTH = uint32_t{800};
-constexpr auto HEIGHT = uint32_t{600};
+constexpr auto HEIGHT = uint32_t{800};
 // constexpr auto MAX_INFLIGHT_IMAGES = 2; // The swapchain support at least 2 presentable images
 
 // Volume data specification
@@ -103,16 +103,19 @@ private:
 // ********* Volume Rendering
 	std::thread importVolumeDataWorker;
 	std::vector<Intensity> intensities; // z-y-x order, contains CT slides
-	vk::Pipeline computePipeline;
-	vk::PipelineLayout computePipelineLayout;
-	vk::ShaderModule volumeShaderModule;
-	vk::DescriptorSetLayout descriptorSetLayout;
-	vk::Sampler sampler;
-	vk::DescriptorPool descriptorPool;
-	vk::Buffer stagingBuffer; vk::DeviceMemory stagingBufferMemory;
-	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory;
-	vk::ImageView volumeImageView;
 	vk::RenderPass volumeRenderPass;
+	vk::Image raycastedImage; vk::DeviceMemory raycastedImageMemory;
+	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory;
+	vk::Buffer stagingBuffer; vk::DeviceMemory stagingBufferMemory;
+	vk::ImageView volumeImageView; vk::ImageView raycastedImageView;
+	vk::Sampler sampler;
+	vk::DescriptorSetLayout descriptorSetLayout;
+	vk::DescriptorPool descriptorPool;
+	std::vector<vk::DescriptorSet> descriptorSets;
+	vk::ShaderModule volumeShaderModule;
+	vk::PipelineLayout computePipelineLayout;
+	vk::Pipeline computePipeline;
+	vk::Event raycastedEvent;
 // ********* Volume Rendering
 
 	GLFWwindow* window;

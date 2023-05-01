@@ -26,8 +26,10 @@ namespace color
 
 namespace format
 {
-	constexpr auto FLoat = vk::Format::eR32Sfloat;
+	constexpr auto Float = vk::Format::eR32Sfloat;
 	constexpr auto Short = vk::Format::eR16Uint;
+	constexpr auto RenderTarget = vk::Format::eR8G8B8A8Unorm;
+	constexpr auto Image = vk::Format::eR8G8B8A8Srgb;
 	constexpr auto vec2 = vk::Format::eR32G32Sfloat;
 	constexpr auto vec3 = vk::Format::eR32G32B32Sfloat;
 	constexpr auto vec4 = vk::Format::eR32G32B32A32Sfloat;

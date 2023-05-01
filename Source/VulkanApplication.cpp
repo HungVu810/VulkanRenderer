@@ -100,7 +100,7 @@ namespace
 	{
 		const auto isSuitable = [](const vk::SurfaceFormatKHR& surfaceFormat)
 		{
-			return surfaceFormat.format == vk::Format::eB8G8R8A8Srgb
+			return surfaceFormat.format == format::Image
 				&& surfaceFormat.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear;
 		};
 		const auto surfaceFormatIter = std::ranges::find_if(surfaceFormat, isSuitable);
@@ -351,7 +351,7 @@ void VulkanApplication::initSwapChain()
 		, surfaceFormat.colorSpace
 		, surfaceExtent
 		, 1 // Number of layers per image, more than 1 for stereoscopic application
-		, vk::ImageUsageFlagBits::eColorAttachment // render directly onto the framebuffers (no post-processing)
+		, vk::ImageUsageFlagBits::eTransferDst // vk::ImageUsageFlagBits::eStorage // | vk::ImageUsageFlagBits::eColorAttachment (original)
 		, vk::SharingMode::eExclusive // Drawing and presentation are done with one physical device's queue
 		, queueFamilies.front().first
 		, surfaceAttributes.capabilities.currentTransform
@@ -362,6 +362,8 @@ void VulkanApplication::initSwapChain()
 	};
 	swapchain = device.createSwapchainKHR(createInfo);
 }
+
+// Default
 void VulkanApplication::initImageViews()
 {
 	const auto images = device.getSwapchainImagesKHR(swapchain);
@@ -379,8 +381,6 @@ void VulkanApplication::initImageViews()
 	};
 	swapchainImageViews = images | std::views::transform(toImageView) | std::ranges::to<std::vector>();
 }
-
-// Default
 void VulkanApplication::initRenderPass()
 {
 	// Descripes how the image views are load/store
@@ -604,68 +604,140 @@ void VulkanApplication::initGraphicPipeline()
 	device.destroyShaderModule(vertexShaderModule);
 	device.destroyShaderModule(fragmentShaderModule);
 }
+void VulkanApplication::initFrameBuffer()
+{
+	framebuffers.resize(swapchainImageViews.size());
+	const auto toFramebuffer = [&](const vk::ImageView& imageView)
+	{
+		const auto framebufferCreateInfo = vk::FramebufferCreateInfo{
+			{}
+			, renderPass
+			, imageView // Attachments
+			, surfaceExtent.width
+			, surfaceExtent.height
+			, 1 // Single layer, not doing stereo-rendering
+		};
+		return device.createFramebuffer(framebufferCreateInfo);
+	};
+	framebuffers = swapchainImageViews | std::views::transform(toFramebuffer) | std::ranges::to<std::vector>();
+}
 // Default
 
-// ********* Volume Rendering *********
+void VulkanApplication::initCommandPool()
+{
+	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
+	const auto commandPoolCreateInfo = vk::CommandPoolCreateInfo{
+		vk::CommandPoolCreateFlagBits::eResetCommandBuffer // reset and rerecord command buffer
+		, queueFamilies.front().first
+	};
+	commandPool = device.createCommandPool(commandPoolCreateInfo);
+}
+void VulkanApplication::initCommandBuffer()
+{
+	const auto allocateInfo = vk::CommandBufferAllocateInfo{
+		commandPool
+		, vk::CommandBufferLevel::ePrimary
+		, 1
+	};
+	// Command buffers are allocated from the command pool
+	commandBuffers = device.allocateCommandBuffers(allocateInfo);
+}
+void VulkanApplication::initSyncObjects()
+{
+	const auto semCreateInfo = vk::SemaphoreCreateInfo{};
+	const auto fenceCreateInfo = vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled}; // First frame doesn't have to wait for the unexisted previous image
+	isAcquiredImageRead = device.createSemaphore(semCreateInfo);
+	isImageRendered = device.createSemaphore(semCreateInfo);
+	isCommandBufferExecuted = device.createFence(fenceCreateInfo);
+}
+
+// ********* Volume Rendering *********, DONT NEED A FRAMEBUFFER, WE USE THE SWAPCHAIN DIRECTLY SINCE NO RENDERPASS IS MADE
 void VulkanApplication::initVolumeRenderPass()
 {
 	// A created attachment is associated with its index in the array
 	// This attachment comes from output of the compute pipeline
-	const auto raycastInputAttachmentDescription = vk::AttachmentDescription{
-		{}
-		, surfaceFormat.format
-		, vk::SampleCountFlagBits::e1 // One sample, no multisampling
-		, vk::AttachmentLoadOp::eLoad
-		, vk::AttachmentStoreOp::eDontCare // We finished with the attachment
-		, vk::AttachmentLoadOp::eDontCare
-		, vk::AttachmentStoreOp::eDontCare
-		, vk::ImageLayout::eColorAttachmentOptimal // Make sure to load with correct layout
-		, vk::ImageLayout::eColorAttachmentOptimal // Don't care
-	};
-	const auto swapchainAttachmentDescription = vk::AttachmentDescription{
-		{}
-		, surfaceFormat.format
-		, vk::SampleCountFlagBits::e1 // One sample, no multisampling
-		, vk::AttachmentLoadOp::eClear // Clear the old color/depth values
-		, vk::AttachmentStoreOp::eStore
-		, vk::AttachmentLoadOp::eDontCare
-		, vk::AttachmentStoreOp::eDontCare
-		, vk::ImageLayout::eUndefined // Don't care since we clear the image
-		, vk::ImageLayout::ePresentSrcKHR
-	};
-	const auto attachmentDescriptions = std::vector{raycastInputAttachmentDescription, swapchainAttachmentDescription};
-	const auto raycastInputAttachmentIndex = 0U;
-	const auto swapchainAttachmentIndex = 1U;
+	//const auto raycastInputAttachmentDescription = vk::AttachmentDescription{
+	//	{}
+	//	, surfaceFormat.format
+	//	, vk::SampleCountFlagBits::e1 // One sample, no multisampling
+	//	, vk::AttachmentLoadOp::eLoad
+	//	, vk::AttachmentStoreOp::eDontCare // We finished with the attachment
+	//	, vk::AttachmentLoadOp::eDontCare
+	//	, vk::AttachmentStoreOp::eDontCare
+	//	, vk::ImageLayout::eColorAttachmentOptimal // Make sure to load with correct layout
+	//	, vk::ImageLayout::eColorAttachmentOptimal // Don't care
+	//};
+	//const auto swapchainAttachmentDescription = vk::AttachmentDescription{
+	//	{}
+	//	, surfaceFormat.format
+	//	, vk::SampleCountFlagBits::e1 // One sample, no multisampling
+	//	, vk::AttachmentLoadOp::eClear // Clear the old color/depth values
+	//	, vk::AttachmentStoreOp::eStore
+	//	, vk::AttachmentLoadOp::eDontCare
+	//	, vk::AttachmentStoreOp::eDontCare
+	//	, vk::ImageLayout::eUndefined // Don't care since we clear the image
+	//	, vk::ImageLayout::ePresentSrcKHR
+	//};
+	//const auto attachmentDescriptions = std::vector{raycastInputAttachmentDescription, swapchainAttachmentDescription};
+	//const auto raycastInputAttachmentIndex = 0U;
+	//const auto swapchainAttachmentIndex = 1U;
 
-	const auto raycastInputAttachmentReference = vk::AttachmentReference{
-		raycastInputAttachmentIndex
-		, vk::ImageLayout::eColorAttachmentOptimal
-	};
-	const auto swapchainAttachmentReference = vk::AttachmentReference{
-		swapchainAttachmentIndex
-		, vk::ImageLayout::eColorAttachmentOptimal
-	};
-	const auto graphicSubpassDescription = vk::SubpassDescription{
-		{}
-		, vk::PipelineBindPoint::eGraphics
-		, raycastInputAttachmentReference
-		, swapchainAttachmentReference
-	};
+	//const auto raycastInputAttachmentReference = vk::AttachmentReference{
+	//	raycastInputAttachmentIndex
+	//	, vk::ImageLayout::eColorAttachmentOptimal
+	//};
+	//const auto swapchainAttachmentReference = vk::AttachmentReference{
+	//	swapchainAttachmentIndex
+	//	, vk::ImageLayout::eColorAttachmentOptimal
+	//};
+	//const auto graphicSubpassDescription = vk::SubpassDescription{
+	//	{}
+	//	, vk::PipelineBindPoint::eGraphics
+	//	, raycastInputAttachmentReference
+	//	, swapchainAttachmentReference
+	//};
 
-	const auto renderPassCreateInfo = vk::RenderPassCreateInfo{
-		{}
-		, attachmentDescriptions
-		, graphicSubpassDescription
-	};
-	volumeRenderPass = device.createRenderPass(renderPassCreateInfo);
-	device.destroyRenderPass(volumeRenderPass);
+	//const auto renderPassCreateInfo = vk::RenderPassCreateInfo{
+	//	{}
+	//	, attachmentDescriptions
+	//	, graphicSubpassDescription
+	//};
+	//volumeRenderPass = device.createRenderPass(renderPassCreateInfo);
+	//device.destroyRenderPass(volumeRenderPass);
 }
+// DONT NEED AN SWAPCHAIN IMAGE VIEW AS WELL
 void VulkanApplication::initComputePipeline()
 {
 	importVolumeDataWorker.join(); // Make sure the volume data is ready
 
-	// Reserve the volume data image resource
+	// Format check
+	auto formatFeatures = physicalDevice.getFormatProperties(surfaceFormat.format).optimalTilingFeatures; // This format is swapchainImage's
+	assert(formatFeatures & (vk::FormatFeatureFlagBits::eStorageImage | vk::FormatFeatureFlagBits::eTransferDst));
+	formatFeatures = physicalDevice.getFormatProperties(format::RenderTarget).optimalTilingFeatures; // This format is for the raycasted image
+	assert(formatFeatures & (vk::FormatFeatureFlagBits::eStorageImage | vk::FormatFeatureFlagBits::eTransferSrc));
+
 	const auto queueFamiliesIndex = getSuitableQueueFamiliesIndex(physicalDevice, surface);
+
+	// Reserve the raycasted target image resource for the compute shader
+	const auto raycastedImageCreateInfo = vk::ImageCreateInfo{
+		{}
+		, vk::ImageType::e2D
+		, format::RenderTarget // TODO: Normalized 1 byte unsigned float, why can't it be surfaceFormat.format
+		, vk::Extent3D{surfaceExtent, 1}
+		, 1 // The only mip level for this image
+		, 1 // Single layer, no stereo-rendering
+		, vk::SampleCountFlagBits::e1 // One sample, no multisampling
+		, vk::ImageTiling::eOptimal
+		, vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc // Transfer command from the staging device memory to the image memory via cmdCopy
+		, vk::SharingMode::eExclusive
+		, queueFamiliesIndex
+	};
+	raycastedImage = device.createImage(raycastedImageCreateInfo);
+	const auto raycastedImageMemoryRequirements = device.getImageMemoryRequirements(raycastedImage);
+	raycastedImageMemory = allocateMemory(device, physicalDevice, raycastedImageMemoryRequirements, false); // TODO: WHY DOESN'T THIS ALLOW HOST-VISIBLE MEMORY?
+	device.bindImageMemory(raycastedImage, raycastedImageMemory, 0);
+
+	// Reserve the volume data image resource as a descriptor in the compute shader
 	const auto volumeImageCreateInfo = vk::ImageCreateInfo{
 		{}
 		, vk::ImageType::e3D
@@ -693,20 +765,18 @@ void VulkanApplication::initComputePipeline()
 		, queueFamiliesIndex
 	};
 	stagingBuffer = device.createBuffer(stagingBufferCreateInfo);
-
 	const auto stagingBufferMemoryRequirement = device.getBufferMemoryRequirements(stagingBuffer);
 	stagingBufferMemory = allocateMemory(device, physicalDevice, stagingBufferMemoryRequirement, true);
-
 	device.bindBufferMemory(stagingBuffer, stagingBufferMemory, 0);
-
 	void* memory = device.mapMemory(stagingBufferMemory, 0, stagingBufferMemoryRequirement.size);
 	std::memcpy(memory, intensities.data(), TOTAL_SCAN_BYTES);
 	device.unmapMemory(stagingBufferMemory);
 
-	// Create a descriptor for the image resource
+	// Create a descriptor for the volumn data and raycasted image resource
 	const auto maxDescriptorSets = 1;	
 	const auto descriptorPoolSizes = std::vector<vk::DescriptorPoolSize>{
 		{vk::DescriptorType::eSampledImage, 1}
+		, {vk::DescriptorType::eStorageImage, 1}
 	};
 	const auto descriptorPoolCreateInfo = vk::DescriptorPoolCreateInfo{
 		{}
@@ -717,23 +787,40 @@ void VulkanApplication::initComputePipeline()
 
 	const auto samplerCreateInfo = vk::SamplerCreateInfo{};
 	sampler = device.createSampler(samplerCreateInfo);
-	const auto descriptorSetBindingNumber = 0; // Used in shader with the syntax "layout (set = 0, binding = 0)"
-	const auto descriptorSetLayoutBinding = vk::DescriptorSetLayoutBinding{
-		descriptorSetBindingNumber
+	const auto volumnImageBinding = vk::DescriptorSetLayoutBinding{
+		0
 		, vk::DescriptorType::eSampledImage
 		, vk::ShaderStageFlagBits::eCompute
 		, sampler
 	};
+
+	//const auto swapchainImageBinding = vk::DescriptorSetLayoutBinding{
+	//	1
+	//	, vk::DescriptorType::eStorageImage
+	//	, vk::ShaderStageFlagBits::eCompute
+	//	, sampler
+	//};
+
+	const auto raycastedImageBinding = vk::DescriptorSetLayoutBinding{
+		1
+		, vk::DescriptorType::eStorageImage
+		, vk::ShaderStageFlagBits::eCompute
+		, sampler
+	};
+
+	const auto layoutBindings = {volumnImageBinding, raycastedImageBinding};
+	//const auto layoutBindings = {volumnImageBinding, swapchainImageBinding};
+
 	const auto descriptorSetLayoutCreateInfo = vk::DescriptorSetLayoutCreateInfo{
 		{}
-		, descriptorSetLayoutBinding
+		, layoutBindings
 	};
 	descriptorSetLayout = device.createDescriptorSetLayout(descriptorSetLayoutCreateInfo);
 
 	const auto descriptorSetsAllocateInfo = vk::DescriptorSetAllocateInfo{descriptorPool, descriptorSetLayout};
-	const auto descriptorSets = device.allocateDescriptorSets(descriptorSetsAllocateInfo);
+	descriptorSets = device.allocateDescriptorSets(descriptorSetsAllocateInfo);
 
-	// Write the volume image to the descriptor
+	// Bind the image resource to the descriptor
 	const auto imageSubresourceRange = vk::ImageSubresourceRange{
 		vk::ImageAspectFlagBits::eColor
 		, 0
@@ -741,6 +828,7 @@ void VulkanApplication::initComputePipeline()
 		, 0
 		, 1
 	};
+
 	const auto volumeImageViewCreateInfo = vk::ImageViewCreateInfo{
 		{}
 		, volumeImage
@@ -750,19 +838,56 @@ void VulkanApplication::initComputePipeline()
 		, imageSubresourceRange
 	};
 	volumeImageView = device.createImageView(volumeImageViewCreateInfo);
-	const auto descriptorImageInfo = vk::DescriptorImageInfo{
+	auto descriptorImageInfo = vk::DescriptorImageInfo{
 		sampler
 		, volumeImageView
-		, vk::ImageLayout::eShaderReadOnlyOptimal
+		, vk::ImageLayout::eShaderReadOnlyOptimal // <------------ TODO: expected layout when used by the shader
 	};
-	const auto writeDescriptorSet = vk::WriteDescriptorSet{
+	auto writeDescriptorSet = vk::WriteDescriptorSet{
 		descriptorSets.front()
-		, descriptorSetBindingNumber
+		, 0
 		, 0
 		, vk::DescriptorType::eSampledImage
 		, descriptorImageInfo
 	};
 	device.updateDescriptorSets(writeDescriptorSet, {});
+
+	const auto raycastedImageViewCreateInfo = vk::ImageViewCreateInfo{
+		{}
+		, raycastedImage
+		, vk::ImageViewType::e2D
+		, format::RenderTarget
+		, {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity}
+		, imageSubresourceRange
+	};
+	raycastedImageView = device.createImageView(raycastedImageViewCreateInfo);
+	descriptorImageInfo = vk::DescriptorImageInfo{
+		sampler
+		, raycastedImageView
+		, vk::ImageLayout::eGeneral // <------------ TODO: expected layout when used by the shader
+	};
+	writeDescriptorSet = vk::WriteDescriptorSet{
+		descriptorSets.front()
+		, 1
+		, 0
+		, vk::DescriptorType::eStorageImage
+		, descriptorImageInfo
+	};
+	device.updateDescriptorSets(writeDescriptorSet, {});
+
+	//descriptorImageInfo = vk::DescriptorImageInfo{
+	//	sampler
+	//	, swapchainImageViews.front()
+	//	, vk::ImageLayout::eGeneral // <------------ TODO: expected layout when used by the shader
+	//};
+	//writeDescriptorSet = vk::WriteDescriptorSet{
+	//	descriptorSets.front()
+	//	, 1
+	//	, 0
+	//	, vk::DescriptorType::eStorageImage
+	//	, descriptorImageInfo
+	//};
+	//device.updateDescriptorSets(writeDescriptorSet, {});
 
 	// Computer pipeline
 	const auto volumeShaderBinaryData = getShaderBinaryData(shaderMap, "VolumeRendering.comp");
@@ -825,23 +950,122 @@ void VulkanApplication::transferStagingBufferToVolumeImage()
 		, {0, 0, 0}
 		, {SLIDE_WIDTH, SLIDE_HEIGHT, NUM_SLIDES}
 	};
-	// copyRegion.
 	commandBuffer.copyBufferToImage(stagingBuffer, volumeImage, vk::ImageLayout::eTransferDstOptimal, copyRegion);
 	commandBuffer.end();
 
-	// submit to transfer queue
+	// Submit to transfer queue
+	const auto isBufferTransferedFence = device.createFence({});
+	queue.submit({}, isBufferTransferedFence);
+	std::ignore = device.waitForFences(isBufferTransferedFence, VK_TRUE, UINT64_MAX); // TODO: Move this to later function so we can do more work inbetween
 
+	device.destroy(isBufferTransferedFence);
 	device.freeCommandBuffers(commandPool, commandBuffer);
 	device.destroyCommandPool(commandPool);
 }
 void VulkanApplication::recordVolumeCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex)
 {
-	// commandBuffer.begin();
-	//  commandBuffer.dispatch();
-	// commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute);
-	// commandBuffer.bindDescriptorSets(); // 3D volume data
-	// commandBuffer.dispatch();
-	// commandBuffer.copyImage(framebuffers[mageIndex], {}, {}); from output of the compute shader to the swapchain
+	const auto commandBufferBeginInfo = vk::CommandBufferBeginInfo{};
+	commandBuffer.begin(commandBufferBeginInfo);
+
+	// Transition layout of the image descriptors before compute pipeline
+	const auto volumeImageBarrierToDescriptor = vk::ImageMemoryBarrier{
+		vk::AccessFlagBits::eNone
+		, vk::AccessFlagBits::eShaderRead
+		, vk::ImageLayout::eUndefined // The default layout
+		, vk::ImageLayout::eShaderReadOnlyOptimal // To the layout the descriptor is expecting
+		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		, volumeImage
+		, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+	};
+	const auto raycasteedImageBarrierToDescriptor = vk::ImageMemoryBarrier{
+		vk::AccessFlagBits::eNone
+		, vk::AccessFlagBits::eShaderRead
+		, vk::ImageLayout::eUndefined // The default layout
+		, vk::ImageLayout::eGeneral // To the layout the descriptor is expecting
+		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		, raycastedImage
+		, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+	};
+	commandBuffer.pipelineBarrier(
+		vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eTopOfPipe
+		, vk::PipelineStageFlagBits::eComputeShader
+		, {}
+		, {}
+		, {}
+		, {volumeImageBarrierToDescriptor, raycasteedImageBarrierToDescriptor}
+	);
+
+	commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, computePipeline);
+	commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, computePipelineLayout, 0, descriptorSets, {}); // 3D volume data
+	const auto numInvocationPerX = 10;
+	const auto numInvocationPerY = 10;
+	commandBuffer.dispatch(WIDTH / numInvocationPerX, HEIGHT / numInvocationPerY, 0);
+
+	// raycastedEvent = device.createEvent({});
+	// commandBuffer.setEvent(raycastedEvent, vk::PipelineStageFlagBits::eComputeShader);
+	// commandBuffer.waitEvents(raycastedEvent, vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, imageMemoryBarrier);
+
+	const auto queueFamiliesIndex = getSuitableQueueFamiliesIndex(physicalDevice, surface);
+	const auto swapchainImage = device.getSwapchainImagesKHR(swapchain)[imageIndex];
+	// Barrier to sync writting to raycastedImage via compute shader and copy it to swapchain image
+	// raycastedImage: General (in descriptor) -> TransferSrcOptimal
+	const auto raycastedImageToTransfer = vk::ImageMemoryBarrier{
+		vk::AccessFlagBits::eShaderWrite // Compute shader writes to raycasted image, vk::AccessFlagBits::eShaderWrite, only use this when the shader write to the memory
+		, vk::AccessFlagBits::eTransferRead // Wait until raycasted image is finished written to then copy
+		, vk::ImageLayout::eGeneral
+		, vk::ImageLayout::eTransferSrcOptimal
+		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		, raycastedImage
+		, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+	};
+	// swapchainImage: General/Color -> TransferDstOptimal
+	const auto swapchainImageToTransfer = vk::ImageMemoryBarrier{
+		vk::AccessFlagBits::eNone // Started out, no access
+		, vk::AccessFlagBits::eTransferWrite // Wait until raycasted image is finished written to then copy
+		, vk::ImageLayout::eUndefined // Default layout
+		, vk::ImageLayout::eTransferDstOptimal
+		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		, swapchainImage
+		, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+	};
+	commandBuffer.pipelineBarrier(
+		vk::PipelineStageFlagBits::eComputeShader
+		, vk::PipelineStageFlagBits::eTransfer
+		, {}
+		, {}
+		, {}
+		, {raycastedImageToTransfer, swapchainImageToTransfer}
+	);
+
+	commandBuffer.copyImage(
+		raycastedImage
+		, vk::ImageLayout::eTransferSrcOptimal
+		, swapchainImage
+		, vk::ImageLayout::eTransferDstOptimal
+		, vk::ImageCopy{
+			vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
+			, {0, 0, 0}
+			, vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
+			, {0, 0, 0}
+			, vk::Extent3D{surfaceExtent, 1}
+		}
+	);
+	commandBuffer.end();
+
+	const auto submitInfo = vk::SubmitInfo{
+		VK_NULL_HANDLE
+		, VK_NULL_HANDLE
+		, commandBuffer
+		, VK_NULL_HANDLE
+	};
+	const auto testFence = device.createFence({});
+	queue.submit(submitInfo, testFence);
+	std::ignore = device.waitForFences(testFence, true, UINT64_MAX);
+	device.destroyFence(testFence);
 
 	//const auto clearColor = vk::ClearValue{color::black};
 	//const auto volumeRenderPassBeginInfo = vk::RenderPassBeginInfo{
@@ -851,11 +1075,9 @@ void VulkanApplication::recordVolumeCommandBuffer(vk::CommandBuffer& commandBuff
 	//	, clearColor
 	//};
 	//commandBuffer.beginRenderPass(volumeRenderPassBeginInfo, vk::SubpassContents::eInline);
-	//// commandBuffer.pipelineBarrier();
-	//// commandBuffer.copyBufferToImage()
+	//commandBuffer.pipelineBarrier();
+	//commandBuffer.copyBufferToImage()
 	//commandBuffer.endRenderPass();
-
-	// commandBuffer.end();
 
 	// TODO: the 3D texture is an input attachment must be bound to the pipeline in a descriptor set
 	// TODO: how to upload the resource to a descriptor
@@ -869,64 +1091,14 @@ void VulkanApplication::recordVolumeCommandBuffer(vk::CommandBuffer& commandBuff
 	// TODO: or make it available via descriptor set?
 	// TODO; the 3D volume data has to be inn a descriptor set
 
-	// storage image descriptor (for the image to be ray casted)
-	// 3D texture sampled descriptor (for the 3D volume data)
 	// run the compute shader in parallel each pixel, instead of going through each of them one by one
-
-	// TODO: upload the 3D volume texture data via the descriptor set
-	// TODO: generate image grid?
-	// TODO: Bound the descripor sets when record the command buffer
 	// TODO: how to present the image in the compute shader after finished ray castingn?
 }
 void VulkanApplication::drawVolumeFrame()
 {
-	//recordCommandBuffer(commandBuffers.front(), 0);
+	recordVolumeCommandBuffer(commandBuffers.front(), 0);
 }
 // ********* Volume Rendering *********
-void VulkanApplication::initFrameBuffer()
-{
-	framebuffers.resize(swapchainImageViews.size());
-	const auto toFramebuffer = [&](const vk::ImageView& imageView)
-	{
-		const auto framebufferCreateInfo = vk::FramebufferCreateInfo{
-			{}
-			, renderPass
-			, imageView // Attachments
-			, surfaceExtent.width
-			, surfaceExtent.height
-			, 1 // Single layer, not doing stereo-rendering
-		};
-		return device.createFramebuffer(framebufferCreateInfo);
-	};
-	framebuffers = swapchainImageViews | std::views::transform(toFramebuffer) | std::ranges::to<std::vector>();
-}
-void VulkanApplication::initCommandPool()
-{
-	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
-	const auto commandPoolCreateInfo = vk::CommandPoolCreateInfo{
-		vk::CommandPoolCreateFlagBits::eResetCommandBuffer // reset and rerecord command buffer
-		, queueFamilies.front().first
-	};
-	commandPool = device.createCommandPool(commandPoolCreateInfo);
-}
-void VulkanApplication::initCommandBuffer()
-{
-	const auto allocateInfo = vk::CommandBufferAllocateInfo{
-		commandPool
-		, vk::CommandBufferLevel::ePrimary
-		, 1
-	};
-	// Command buffers are allocated from the command pool
-	commandBuffers = device.allocateCommandBuffers(allocateInfo);
-}
-void VulkanApplication::initSyncObjects()
-{
-	const auto semCreateInfo = vk::SemaphoreCreateInfo{};
-	const auto fenceCreateInfo = vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled}; // First frame doesn't have to wait for the unexisted previous image
-	isAcquiredImageRead = device.createSemaphore(semCreateInfo);
-	isImageRendered = device.createSemaphore(semCreateInfo);
-	isCommandBufferExecuted = device.createFence(fenceCreateInfo);
-}
 void VulkanApplication::initVulkan()
 {
 	if (glfwVulkanSupported() != GLFW_TRUE) throw std::runtime_error{"Vulkan is not supported"};
@@ -940,32 +1112,34 @@ void VulkanApplication::initVulkan()
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(device); // Extend dispatcher to device dependent EXT function pointers
 	initQueue();
 	initSwapChain();
-	initImageViews();
 
+	//initImageViews();
 	//initRenderPass();
 	//initGraphicPipeline();
+	//initFrameBuffer();
 
-	initVolumeRenderPass();
+	//initVolumeRenderPass();
 	initComputePipeline();
 
-	//initFrameBuffer();
-	//initCommandPool();
-	//initCommandBuffer();
-	//initSyncObjects();
+	initCommandPool();
+	initCommandBuffer();
+	initSyncObjects();
+
 }
 
 void VulkanApplication::mainLoop()
 {
 	transferStagingBufferToVolumeImage();
+	drawVolumeFrame();
 
-	while (!glfwWindowShouldClose(window))
-	{
-		glfwPollEvents();
-		//drawFrame();
-		drawVolumeFrame();
-	}
+	//while (!glfwWindowShouldClose(window))
+	//{
+	//	glfwPollEvents();
+	//	//drawFrame();
+	//	drawVolumeFrame();
+	//}
 
-	device.waitIdle();
+	device.waitIdle(); // wait for the queue(s) to become idle, finished executing the cmd?
 }
 
 void VulkanApplication::recordCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex)
@@ -1013,27 +1187,28 @@ void VulkanApplication::drawFrame()
 
 void VulkanApplication::cleanUp()
 {
+	device.destroy(isAcquiredImageRead);
+	device.destroy(isImageRendered);
+	device.destroy(isCommandBufferExecuted);
+	device.destroyCommandPool(commandPool);
 
 	// ***** Volume rendering
+	device.destroyEvent(raycastedEvent);
 	device.destroyPipeline(computePipeline);
 	device.destroyPipelineLayout(computePipelineLayout);
 	device.destroyShaderModule(volumeShaderModule);
-	// device.freeDescriptorSets(descriptorPool, descriptorSets);
 	device.destroyDescriptorSetLayout(descriptorSetLayout);
 	device.destroySampler(sampler);
 	device.destroyDescriptorPool(descriptorPool);
 	device.freeMemory(stagingBufferMemory); device.destroyBuffer(stagingBuffer);
-	device.destroyImageView(volumeImageView);
+	device.destroyImageView(volumeImageView); device.destroyImageView(raycastedImageView);
 	device.freeMemory(volumeImageMemory); device.destroyImage(volumeImage);
+	device.freeMemory(raycastedImageMemory); device.destroyImage(raycastedImage);
 	for (const vk::Framebuffer& framebuffer : framebuffers) device.destroyFramebuffer(framebuffer);
 	for (const vk::ImageView& imageView : swapchainImageViews) device.destroyImageView(imageView);
 	// ***** Volume rendering
 
 	// Destroy the objects in reverse order of their creation order
-	//device.destroy(isAcquiredImageRead);
-	//device.destroy(isImageRendered);
-	//device.destroy(isCommandBufferExecuted);
-	//device.destroyCommandPool(commandPool);
 	//for (const vk::Framebuffer& framebuffer : framebuffers) device.destroyFramebuffer(framebuffer);
 	//device.destroyPipeline(graphicPipeline);
 	//device.destroyPipelineLayout(pipelineLayout);
