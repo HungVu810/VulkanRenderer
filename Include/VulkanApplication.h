@@ -25,8 +25,8 @@ namespace
 	using QueueFamily = std::pair<QueueFamilyIndex, QueuesPriorities>;
 }
 
-constexpr auto WIDTH = uint32_t{800};
-constexpr auto HEIGHT = uint32_t{800};
+constexpr auto WIDTH = uint32_t{800}; // 800, 1280
+constexpr auto HEIGHT = uint32_t{800}; // 800, 720
 // constexpr auto MAX_INFLIGHT_IMAGES = 2; // The swapchain support at least 2 presentable images
 
 // Volume data specification

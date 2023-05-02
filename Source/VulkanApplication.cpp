@@ -1001,9 +1001,10 @@ void VulkanApplication::recordVolumeCommandBuffer(vk::CommandBuffer& commandBuff
 
 	commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, computePipeline);
 	commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, computePipelineLayout, 0, descriptorSets, {}); // 3D volume data
-	const auto numInvocationPerX = 10;
-	const auto numInvocationPerY = 10;
-	commandBuffer.dispatch(WIDTH / numInvocationPerX, HEIGHT / numInvocationPerY, 0);
+	const auto numInvocationPerX = 10; // Also put this number in the compute shader
+	const auto numInvocationPerY = 10; // Also put this number in the compute shader
+	assert((WIDTH % numInvocationPerX) == 0 && (HEIGHT % numInvocationPerY) == 0);
+	commandBuffer.dispatch(WIDTH / numInvocationPerX, HEIGHT / numInvocationPerY, 1); // *******NOTE: group size must be at least 1
 
 	const auto swapchainImage = device.getSwapchainImagesKHR(swapchain)[imageIndex];
 
@@ -1239,57 +1240,3 @@ void VulkanApplication::cleanUp()
 	glfwTerminate();
 }
 
-
-void VulkanApplication::initVolumeRenderPass()
-{
-	// A created attachment is associated with its index in the array
-	// This attachment comes from output of the compute pipeline
-	//const auto raycastInputAttachmentDescription = vk::AttachmentDescription{
-	//	{}
-	//	, surfaceFormat.format
-	//	, vk::SampleCountFlagBits::e1 // One sample, no multisampling
-	//	, vk::AttachmentLoadOp::eLoad
-	//	, vk::AttachmentStoreOp::eDontCare // We finished with the attachment
-	//	, vk::AttachmentLoadOp::eDontCare
-	//	, vk::AttachmentStoreOp::eDontCare
-	//	, vk::ImageLayout::eColorAttachmentOptimal // Make sure to load with correct layout
-	//	, vk::ImageLayout::eColorAttachmentOptimal // Don't care
-	//};
-	//const auto swapchainAttachmentDescription = vk::AttachmentDescription{
-	//	{}
-	//	, surfaceFormat.format
-	//	, vk::SampleCountFlagBits::e1 // One sample, no multisampling
-	//	, vk::AttachmentLoadOp::eClear // Clear the old color/depth values
-	//	, vk::AttachmentStoreOp::eStore
-	//	, vk::AttachmentLoadOp::eDontCare
-	//	, vk::AttachmentStoreOp::eDontCare
-	//	, vk::ImageLayout::eUndefined // Don't care since we clear the image
-	//	, vk::ImageLayout::ePresentSrcKHR
-	//};
-	//const auto attachmentDescriptions = std::vector{raycastInputAttachmentDescription, swapchainAttachmentDescription};
-	//const auto raycastInputAttachmentIndex = 0U;
-	//const auto swapchainAttachmentIndex = 1U;
-
-	//const auto raycastInputAttachmentReference = vk::AttachmentReference{
-	//	raycastInputAttachmentIndex
-	//	, vk::ImageLayout::eColorAttachmentOptimal
-	//};
-	//const auto swapchainAttachmentReference = vk::AttachmentReference{
-	//	swapchainAttachmentIndex
-	//	, vk::ImageLayout::eColorAttachmentOptimal
-	//};
-	//const auto graphicSubpassDescription = vk::SubpassDescription{
-	//	{}
-	//	, vk::PipelineBindPoint::eGraphics
-	//	, raycastInputAttachmentReference
-	//	, swapchainAttachmentReference
-	//};
-
-	//const auto renderPassCreateInfo = vk::RenderPassCreateInfo{
-	//	{}
-	//	, attachmentDescriptions
-	//	, graphicSubpassDescription
-	//};
-	//volumeRenderPass = device.createRenderPass(renderPassCreateInfo);
-	//device.destroyRenderPass(volumeRenderPass);
-}
