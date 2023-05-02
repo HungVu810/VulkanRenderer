@@ -11,7 +11,7 @@
 #include "Shader.h"
 
 #ifdef NDEBUG
-	const bool bEnableValidationLayers = false;
+	const bool isValidationLayersEnabled = false;
 #else
 	const bool isValidationLayersEnabled = true;
 #endif
@@ -66,9 +66,10 @@ private:
 // ********* Volume Rendering
 	void initVolumeRenderPass();
 	void initComputePipeline();
-	void recordVolumeCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex);
 	void drawVolumeFrame();
-	void transferStagingBufferToVolumeImage();
+	void transferStagingBufferToVolumeImageAndTransitionLayouts();
+	//void recordVolumeCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex);
+	void recordVolumeCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex, vk::Result fenceResult);
 // ********* Volume Rendering
 	void initVulkan();
 
@@ -140,9 +141,9 @@ private:
 	std::vector<vk::Framebuffer> framebuffers;
 	vk::CommandPool commandPool;
 	std::vector<vk::CommandBuffer> commandBuffers;
-	vk::Semaphore isAcquiredImageRead;
-	vk::Semaphore isImageRendered;
-	vk::Fence isCommandBufferExecuted;
+	vk::Semaphore isAcquiredImageReadSemaphore;
+	vk::Semaphore isImageRenderedSemaphore;
+	vk::Fence isCommandBufferExecutedFence;
 };
 
 
