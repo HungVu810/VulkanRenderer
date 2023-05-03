@@ -1,10 +1,10 @@
 #version 450
 
-layout (local_size_x = 10, local_size_y = 10) in;
+layout (local_size_x = 10, local_size_y = 10, local_size_z = 1) in; // at least 1 for each local size
 
 layout(set = 0, binding = 0) uniform sampler3D volumnSampler; // stores intensities
 
-layout(set = 0, binding = 1, rgba8_snorm) uniform writeonly image2D raycastedImage;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D raycastedImage;
 
 // augment the uv with world space and the volumnSampler with world space coordinate (x,y,z)
 // descriptor of the width and height of the screen (push constant?)
@@ -14,13 +14,18 @@ layout(set = 0, binding = 1, rgba8_snorm) uniform writeonly image2D raycastedIma
 // run the compute shader in parallel each pixel, instead of going through each of them one by one
 // TODO: how to present the image in the compute shader after finished ray castingn?
 
+//[[nodiscard]] inline auto getIntensity(std::span<Intensity, NUM_INTENSITIES> slides, int z, int y, int x)
+//{
+//	return slides[(z * SLIDE_HEIGHT * SLIDE_WIDTH) + (y * SLIDE_WIDTH) + x];
+// }
+
 
 void main()
 {
 	ivec2 imageDimension = imageSize(raycastedImage);
 	// ivec2 localInvocXY = ivec2(gl_GlobalInvocationID.xy) / imageDimension; // Local invocation x,y?
 
-	ivec4 red = ivec4(1, 0, 0, 1); // R8G8B8A8
+	ivec4 red = ivec4(0.0f, 0.0f, 1.0f, 1.0f); // R8G8B8A8
 	imageStore(raycastedImage, ivec2(gl_GlobalInvocationID.xy), red);
 }
 

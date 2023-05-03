@@ -5,10 +5,8 @@
 #include <vulkan/vulkan.hpp>
 #include <iostream>
 #include <vector>
-#include <thread>
-#include <unordered_map>
+#include <functional>
 #include "Utilities.h"
-#include "Shader.h"
 
 #ifdef NDEBUG
 	const bool isValidationLayersEnabled = false;
@@ -18,23 +16,95 @@
 
 namespace
 {
-	using Intensity = uint16_t;
-
 	using QueueFamilyIndex = uint32_t;
 	using QueuesPriorities = std::vector<float>;
 	using QueueFamily = std::pair<QueueFamilyIndex, QueuesPriorities>;
+
+
+	constexpr auto WIDTH = uint32_t{800}; // 800, 1280
+	constexpr auto HEIGHT = uint32_t{800}; // 800, 720
+	// constexpr auto MAX_INFLIGHT_IMAGES = 2; // The swapchain support at least 2 presentable images
+
+	// Public helpers
+	[[nodiscard]] auto inline getQueueFamilyIndices(const std::vector<QueueFamily>& queueFamilies)
+	{
+		const auto toQueueFamilyIndex = [](const QueueFamily& queueFamily){return queueFamily.first;};
+		const auto queueFamiliesIndex = queueFamilies | std::views::transform(toQueueFamilyIndex) | std::ranges::to<std::vector>();
+		return queueFamiliesIndex;
+	}
+	[[nodiscard]] auto inline checkFormatFeatures(const vk::PhysicalDevice& physicalDevice, vk::Format format, vk::FormatFeatureFlagBits requestedFormatFeatures)
+	{
+		const auto supportedFormatFeatures = physicalDevice.getFormatProperties(format).optimalTilingFeatures;
+		const auto isSupported = supportedFormatFeatures & requestedFormatFeatures;
+		if (!isSupported) throw std::runtime_error{"Requested format features are not supported"};
+	}
 }
 
-constexpr auto WIDTH = uint32_t{800}; // 800, 1280
-constexpr auto HEIGHT = uint32_t{800}; // 800, 720
-// constexpr auto MAX_INFLIGHT_IMAGES = 2; // The swapchain support at least 2 presentable images
+template <typename T>
+struct Resource
+{
+	T data;
+	vk::Format format; // Data type for the underlying elements of data
+};
+struct SurfaceInfo
+{
+	vk::Format format;
+	vk::Extent2D extent;
+};
+struct SyncObjects
+{
+	vk::Semaphore isAcquiredImageReadSemaphore;
+	vk::Semaphore isImageRenderedSemaphore;
+	vk::Fence isCommandBufferExecutedFence;
+};
+struct ApplicationInfo
+{
+	const vk::SurfaceKHR surface;
+	const vk::PhysicalDevice physicalDevice;
+	const vk::Device device;
+	const vk::Queue queue;
+	const std::vector<QueueFamily> queueFamilies; // getSuitableQueueFamilies(physicalDevice, surface);
+	const vk::SwapchainKHR swapchain;
+	const vk::Format surfaceFormat;
+	const vk::Extent2D surfaceExtent;
+	const std::vector<vk::CommandBuffer> commandBuffers;
+	const vk::Semaphore isAcquiredImageReadSemaphore;
+	const vk::Semaphore isImageRenderedSemaphore;
+	const vk::Fence isCommandBufferExecutedFence;
+};
 
-// Volume data specification
-constexpr auto NUM_SLIDES = 113;
-constexpr auto SLIDE_HEIGHT = 256;
-constexpr auto SLIDE_WIDTH = 256;
-constexpr auto NUM_INTENSITIES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
-constexpr auto TOTAL_SCAN_BYTES = NUM_INTENSITIES * sizeof(Intensity); // format type is format::Short, used for image/imageView creation
+namespace
+{
+	using ApplicationFunction = std::function<void(const ApplicationInfo&)>;
+}
+
+struct RunInfo
+{
+	RunInfo(
+		const std::vector<std::string>& inExtraInstanceExtensions
+		, const std::vector<std::string>& inExtraDeviceExtensions
+		, vk::ImageUsageFlagBits inSwapchainImageUsage
+		, const ApplicationFunction& inPreRenderLoop
+		, const ApplicationFunction& inRenderFrame
+		, const ApplicationFunction& inPostRenderLoop
+	) : extraInstanceExtensions{inExtraInstanceExtensions}
+		, extraDeviceExtensions{inExtraDeviceExtensions}
+		, swapchainImageUsage{inSwapchainImageUsage}
+		, preRenderLoop{inPreRenderLoop}
+		, renderFrame{inRenderFrame}
+		, postRenderLoop{inPostRenderLoop}
+	{}
+
+	// TODO: If the Application need to modifies this application, use this RunInfo struct to do so implicitly
+	const std::vector<std::string> extraInstanceExtensions;
+	const std::vector<std::string> extraDeviceExtensions;
+	const vk::ImageUsageFlagBits swapchainImageUsage;
+	const ApplicationFunction preRenderLoop; // For pipeline setup, framebuffer, layout transition, etc.
+	const ApplicationFunction renderFrame; // Buffering recording and rendering for one frame
+	const ApplicationFunction postRenderLoop; // Cleanup of pipeline and resources created via preRenderLoop(). This is called before the actual cleanUp()
+	// TODO: Change to span<string_view>?
+	// TODO: Make class vulkan a struct so the other main application can interact with via their struct/class
+};
 
 class VulkanApplication
 {
@@ -43,13 +113,12 @@ public:
 
 	~VulkanApplication() noexcept;
 
-	// All exceptions are handled in this function so we can clean up the
-	// resources thereafter.
-	void run() noexcept;
+	void run(const RunInfo& runInfo) noexcept;
 
 private:
 	void initWindow();
 
+	void initVulkan(const RunInfo& runInfo);
 	void initDispatcher();
 	void initInstance();
 	void initDebugMessenger();
@@ -57,31 +126,12 @@ private:
 	void initPhysicalDevice();
 	void initDevice();
 	void initQueue();
-	void initSwapChain();
-	void initImageViews();
-// ********* Default
-	void initRenderPass();
-	void initGraphicPipeline();
-// ********* Default
-// ********* Volume Rendering
-	void initVolumeRenderPass();
-	void initComputePipeline();
-	void drawVolumeFrame();
-	void transferStagingBufferToVolumeImageAndTransitionLayouts();
-	//void recordVolumeCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex);
-	void recordVolumeCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex, vk::Result fenceResult);
-// ********* Volume Rendering
-	void initVulkan();
-
-	void initFrameBuffer();
+	void initSwapChain(vk::ImageUsageFlagBits swapchainImageUsage);
 	void initCommandPool();
 	void initCommandBuffer();
 	void initSyncObjects();
-	void recordCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex);
 
-	void mainLoop();
-
-	void drawFrame();
+	void renderLoop(const ApplicationFunction& renderFrame, const ApplicationInfo& applicationInfo);
 
 	void cleanUp();
 
@@ -101,29 +151,9 @@ private:
 	}
 
 private:
-// ********* Volume Rendering
-	std::thread importVolumeDataWorker;
-	std::vector<Intensity> intensities; // z-y-x order, contains CT slides
-	vk::RenderPass volumeRenderPass;
-	vk::Image raycastedImage; vk::DeviceMemory raycastedImageMemory;
-	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory;
-	vk::Buffer stagingBuffer; vk::DeviceMemory stagingBufferMemory;
-	vk::ImageView volumeImageView; vk::ImageView raycastedImageView;
-	vk::Sampler sampler;
-	vk::DescriptorSetLayout descriptorSetLayout;
-	vk::DescriptorPool descriptorPool;
-	std::vector<vk::DescriptorSet> descriptorSets;
-	vk::ShaderModule volumeShaderModule;
-	vk::PipelineLayout computePipelineLayout;
-	vk::Pipeline computePipeline;
-	vk::Event raycastedEvent;
-// ********* Volume Rendering
-
 	GLFWwindow* window;
-	std::unordered_map<std::string, Shader> shaderMap;
-	std::thread validateShadersWorker;
 	vk::Instance instance;
-	vk::DebugUtilsMessengerCreateInfoEXT debugMessengerCreateInfo; // TODO: Needed ?
+	vk::DebugUtilsMessengerCreateInfoEXT debugMessengerCreateInfo;
 	vk::DebugUtilsMessengerEXT debugMessenger;
 	vk::SurfaceKHR surface;
 	vk::PhysicalDevice physicalDevice;
@@ -132,13 +162,7 @@ private:
 	vk::SurfaceFormatKHR surfaceFormat;
 	vk::Extent2D surfaceExtent;
 	vk::SwapchainKHR swapchain;
-	std::vector<vk::ImageView> swapchainImageViews;
-	vk::RenderPass renderPass;
-	vk::Buffer vertexBuffer;
-	vk::DeviceMemory vertexBufferMemory;
-	vk::PipelineLayout pipelineLayout;
-	vk::Pipeline graphicPipeline;
-	std::vector<vk::Framebuffer> framebuffers;
+	// RenderLoop synchronizatoin
 	vk::CommandPool commandPool;
 	std::vector<vk::CommandBuffer> commandBuffers;
 	vk::Semaphore isAcquiredImageReadSemaphore;
