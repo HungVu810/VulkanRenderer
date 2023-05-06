@@ -1,10 +1,14 @@
 #pragma once
 #include "vulkan/vulkan.hpp"
+#include "glm/vec2.hpp"
+#include "glm/vec3.hpp"
+#include "glm/vec4.hpp"
 #include <filesystem>
+#include <ranges>
 #include <fstream>
 #include <cassert>
 #include <iostream>
-#include <ranges>
+#include <type_traits>
 
 namespace tag
 {
@@ -26,12 +30,26 @@ namespace color
 
 namespace format
 {
-	constexpr auto Float = vk::Format::eR32Sfloat;
-	constexpr auto Short = vk::Format::eR16Uint;
-	constexpr auto Image = vk::Format::eR8G8B8A8Unorm; // [0, 1], vk::Format::eR8G8B8A8Srgb
-	constexpr auto vec2 = vk::Format::eR32G32Sfloat;
-	constexpr auto vec3 = vk::Format::eR32G32B32Sfloat;
-	constexpr auto vec4 = vk::Format::eR32G32B32A32Sfloat;
+	struct Image{};
+	struct Half{}; // Half-float, 16bit, available in glm but has a placeholder for now.
+}
+
+template<typename T>
+constexpr auto toVulkanFormat()
+{
+	if (std::is_same_v<T, float>) return vk::Format::eR32Sfloat;
+	else if (std::is_same_v<T, short>) return vk::Format::eR16Sint;
+	else if (std::is_same_v<T, int>) return vk::Format::eR32Sint;
+	else if (std::is_same_v<T, format::Half>) return vk::Format::eR16Sfloat;
+	else if (std::is_same_v<T, format::Image>) {
+		return vk::Format::eR8G8B8A8Unorm;
+		// [0.0, 1.0]^4 == ([0, 255] / 255)^4. Using this format for the image because it's supported madatorily && contains the most format features
+		// https://registry.khronos.org/vulkan/site/spec/latest/chapters/formats.html#VkFormat
+	}
+	else if (std::is_same_v<T, glm::vec2>) return vk::Format::eR32G32Sfloat;
+	else if (std::is_same_v<T, glm::vec3>) return vk::Format::eR32G32B32Sfloat;
+	else if (std::is_same_v<T, glm::vec4>) return vk::Format::eR32G32B32A32Sfloat;
+	else return vk::Format::eUndefined;
 }
 
 // inlines/constexpr healpers

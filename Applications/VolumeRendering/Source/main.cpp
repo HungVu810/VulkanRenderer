@@ -14,16 +14,16 @@
 
 namespace 
 {
-	using Intensity = uint16_t;
+	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
 	constexpr auto NUM_SLIDES = 113;
 	constexpr auto SLIDE_HEIGHT = 256;
 	constexpr auto SLIDE_WIDTH = 256;
 	constexpr auto NUM_INTENSITIES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
-	constexpr auto TOTAL_SCAN_BYTES = NUM_INTENSITIES * sizeof(Intensity); // format type is format::Short, used for image/imageView creation
+	constexpr auto TOTAL_SCAN_BYTES = NUM_INTENSITIES * sizeof(Intensity);
 
 	// z-y-x order, contains all intensity values of each slide images. Tightly packed
 	// vector instead of array bececause NUM_INTENSITIES is large, occupy the heap instead
-	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), format::Short};
+	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // Check 
 	auto shaderMap = std::unordered_map<std::string, Shader>{};
 	vk::Image raycastedImage; vk::DeviceMemory raycastedImageMemory;
 	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory;
@@ -47,7 +47,7 @@ namespace
 			auto ctFile = std::ifstream{ctPath, std::ios_base::binary};
 			if (!ctFile) throw std::runtime_error{"Can't open file at " + ctPath.string()};
 
-			auto intensity = uint16_t{0};
+			auto intensity = uint16_t{0}; // Data is type short
 			for (; ctFile.read(reinterpret_cast<char*>(&intensity), sizeof(intensity)); dataIndex++)
 			{
 				// Swap byte order if running on little-endian system
@@ -57,6 +57,12 @@ namespace
 				intensities.data[dataIndex] = intensity;
 			}
 		}
+		// Normalize the data
+		const auto iterMax = std::ranges::max_element(intensities.data);
+		const auto maxIntensity = *iterMax;
+		const auto normalize = [&](Intensity& intensity){ return intensity /= maxIntensity; };
+		std::ranges::for_each(intensities.data, normalize);
+		const auto iterMaxlc = std::ranges::max_element(intensities.data);
 	}
 	void initComputePipeline(const ApplicationInfo& applicationInfo)
 	{
@@ -66,6 +72,9 @@ namespace
 		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eStorageImage);
 		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferDst);
 		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferSrc);
+
+		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eSampledImage);
+		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eTransferDst);
 
 		const auto queueFamiliesIndex = getQueueFamilyIndices(queueFamilies);
 
@@ -125,7 +134,7 @@ namespace
 		// Create a descriptor for the volumn image and the raycasted image
 		const auto maxDescriptorSets = 1;	
 		const auto descriptorPoolSizes = std::vector<vk::DescriptorPoolSize>{
-			{vk::DescriptorType::eSampledImage, 1} // Volume image
+			{vk::DescriptorType::eCombinedImageSampler, 1} // Volume image
 			, {vk::DescriptorType::eStorageImage, 1} // Raycasted image
 		};
 		const auto descriptorPoolCreateInfo = vk::DescriptorPoolCreateInfo{
@@ -137,7 +146,7 @@ namespace
 		sampler = device.createSampler({});
 		const auto volumnImageBinding = vk::DescriptorSetLayoutBinding{
 			0
-			, vk::DescriptorType::eSampledImage
+			, vk::DescriptorType::eCombinedImageSampler
 			, vk::ShaderStageFlagBits::eCompute
 			, sampler
 		};
@@ -169,7 +178,7 @@ namespace
 			descriptorSets.front()
 			, 0
 			, 0
-			, vk::DescriptorType::eSampledImage
+			, vk::DescriptorType::eCombinedImageSampler
 			, descriptorImageInfo
 		}, {});
 
@@ -215,13 +224,13 @@ namespace
 	}
 	void submitTemporaryCommandBuffer(const ApplicationInfo& applicationInfo)
 	{
+		// Purpose of this temporary commandBuffer submission:
+		// Layout transition of the swapchain images to presentSrcKHR (PRESENTABLE IMAGE) in order to acquire the image index during the rendering loop without causing error
+
 		APPLICATION_INFO_BINDINGS
 
 		const auto queueFamilyIndex = getQueueFamilyIndices(queueFamilies).front(); // TODO: Use the first queueFamilyIndex for now
 
-		// Create a temporary commandBuffer for
-		// 1. Copy from the staging buffer to the volume image
-		// 2. Layout transition of the swapchain images in order to make the acquired image index valid during the rendering loop
 		const auto commandPool = device.createCommandPool(vk::CommandPoolCreateInfo{
 			vk::CommandPoolCreateFlagBits::eTransient
 			, queueFamilyIndex
@@ -237,33 +246,6 @@ namespace
 		commandBuffer.begin(vk::CommandBufferBeginInfo{
 			vk::CommandBufferUsageFlagBits::eOneTimeSubmit
 		});
-
-		// Volume image layout: undefined -> transferDstOptimal
-		commandBuffer.copyBufferToImage(stagingBuffer, volumeImage, vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy{
-			0
-			, 0
-			, 0
-			, vk::ImageSubresourceLayers{
-				vk::ImageAspectFlagBits::eColor
-				, 0
-				, 0
-				, 1
-			}
-			, vk::Offset3D{0, 0, 0}
-			, vk::Extent3D{SLIDE_WIDTH, SLIDE_HEIGHT, NUM_SLIDES}
-		});
-
-		// Volume image layout: transferDstOptimal -> shaderReadOnlyOptimal
-		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, {vk::ImageMemoryBarrier{
-			vk::AccessFlagBits::eTransferWrite
-			, vk::AccessFlagBits::eShaderRead
-			, vk::ImageLayout::eTransferDstOptimal
-			, vk::ImageLayout::eShaderReadOnlyOptimal
-			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-			, VK_QUEUE_FAMILY_IGNORED
-			, volumeImage
-			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-		}});
 
 		// Swapchain images layout: undefined -> presentSrcKHR
 		const auto swapchainImages = device.getSwapchainImagesKHR(swapchain);
@@ -300,7 +282,7 @@ namespace
 		const auto& renderCommandBuffer = renderCommandBuffers.front(); // TODO: Use the first command buffer for now
 
 		renderCommandBuffer.begin(vk::CommandBufferBeginInfo{});
-		
+
 		// Transition layout of the image descriptors before compute pipeline
 		// Raycasted image layout: undefined (default)/transferSrc -> general, expected by the descriptor
 		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, vk::ImageMemoryBarrier{
@@ -313,6 +295,47 @@ namespace
 				, raycastedImage
 				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
+
+		if (fenceResult == vk::Result::eSuccess)
+		{
+			// Volume image layout: undefined -> transferDstOptimal
+			renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
+				vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+				, vk::AccessFlagBits::eTransferWrite
+				, vk::ImageLayout::eUndefined
+				, vk::ImageLayout::eTransferDstOptimal
+				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+				, VK_QUEUE_FAMILY_IGNORED
+				, volumeImage
+				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+			}});
+
+			renderCommandBuffer.copyBufferToImage(stagingBuffer, volumeImage, vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy{
+				0
+				, 0
+				, 0
+				, vk::ImageSubresourceLayers{
+					vk::ImageAspectFlagBits::eColor
+					, 0
+					, 0
+					, 1
+				}
+				, vk::Offset3D{0, 0, 0}
+				, vk::Extent3D{SLIDE_WIDTH, SLIDE_HEIGHT, NUM_SLIDES}
+			});
+
+			// Volume image layout: transferDstOptimal -> shaderReadOnlyOptimal
+			renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, {vk::ImageMemoryBarrier{
+				vk::AccessFlagBits::eTransferWrite
+				, vk::AccessFlagBits::eShaderRead
+				, vk::ImageLayout::eTransferDstOptimal
+				, vk::ImageLayout::eShaderReadOnlyOptimal
+				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+				, VK_QUEUE_FAMILY_IGNORED
+				, volumeImage
+				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+			}});
+		}
 
 		renderCommandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, computePipeline);
 		renderCommandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, computePipelineLayout, 0, descriptorSets, {}); // 3D volume data

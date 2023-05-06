@@ -98,7 +98,7 @@ namespace
 	{
 		const auto isSuitable = [](const vk::SurfaceFormatKHR& surfaceFormat)
 		{
-			return surfaceFormat.format == format::Image
+			return surfaceFormat.format == toVulkanFormat<format::Image>()
 				&& surfaceFormat.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear;
 		};
 		const auto surfaceFormatIter = std::ranges::find_if(surfaceFormats, isSuitable);

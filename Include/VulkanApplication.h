@@ -14,6 +14,8 @@
 	const bool isValidationLayersEnabled = true;
 #endif
 
+	// TODO: mark constructor as explicit
+
 namespace
 {
 	using QueueFamilyIndex = uint32_t;
