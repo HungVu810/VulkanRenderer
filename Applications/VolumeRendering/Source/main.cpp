@@ -29,7 +29,7 @@ namespace
 	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory;
 	vk::Buffer stagingBuffer; vk::DeviceMemory stagingBufferMemory;
 	vk::ImageView volumeImageView; vk::ImageView raycastedImageView;
-	vk::Sampler sampler;
+	vk::Sampler volumeImageSampler;
 	vk::DescriptorSetLayout descriptorSetLayout;
 	vk::DescriptorPool descriptorPool;
 	std::vector<vk::DescriptorSet> descriptorSets;
@@ -143,18 +143,36 @@ namespace
 			, descriptorPoolSizes
 		};
 		descriptorPool = device.createDescriptorPool(descriptorPoolCreateInfo);
-		sampler = device.createSampler({});
+		volumeImageSampler = device.createSampler(vk::SamplerCreateInfo{
+			{}
+			, vk::Filter::eNearest // TODO: try linear
+			, vk::Filter::eNearest // TODO: try linear
+			, vk::SamplerMipmapMode::eNearest
+			, vk::SamplerAddressMode::eClampToBorder // U
+			, vk::SamplerAddressMode::eClampToBorder // V
+			, vk::SamplerAddressMode::eClampToBorder // W
+			, 0.0f
+			, VK_FALSE
+			, 0.0f
+			, VK_FALSE
+			, vk::CompareOp::eNever
+			, 0.0f
+			, 0.0f
+			, vk::BorderColor::eIntOpaqueBlack // Border Color
+			, VK_FALSE // Always normalize coordinate
+
+		});
 		const auto volumnImageBinding = vk::DescriptorSetLayoutBinding{
 			0
 			, vk::DescriptorType::eCombinedImageSampler
 			, vk::ShaderStageFlagBits::eCompute
-			, sampler
+			, volumeImageSampler
 		};
 		const auto raycastedImageBinding = vk::DescriptorSetLayoutBinding{
 			1
 			, vk::DescriptorType::eStorageImage
 			, vk::ShaderStageFlagBits::eCompute
-			, sampler
+			, volumeImageSampler
 		};
 		const auto layoutBindings = {volumnImageBinding, raycastedImageBinding};
 		descriptorSetLayout = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{{}, layoutBindings});
@@ -170,7 +188,7 @@ namespace
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 		auto descriptorImageInfo = vk::DescriptorImageInfo{
-			sampler
+			volumeImageSampler
 			, volumeImageView
 			, vk::ImageLayout::eShaderReadOnlyOptimal // Expected layout of the descriptor
 		};
@@ -192,7 +210,7 @@ namespace
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 		descriptorImageInfo = vk::DescriptorImageInfo{
-			sampler
+			volumeImageSampler
 			, raycastedImageView
 			, vk::ImageLayout::eGeneral // Expected layout of the storage descriptor
 		};
@@ -267,11 +285,9 @@ namespace
 		commandBuffer.end();
 
 		// Submit to transfer queue
-		const auto isBufferTransferedFence = device.createFence({});
-		queue.submit({}, isBufferTransferedFence);
-		std::ignore = device.waitForFences(isBufferTransferedFence, VK_TRUE, std::numeric_limits<uint64_t>::max()); // Destroy when finished
+		queue.submit({}, {});
+		queue.waitIdle();
 
-		device.destroy(isBufferTransferedFence);
 		device.freeCommandBuffers(commandPool, commandBuffer);
 		device.destroyCommandPool(commandPool);
 	}
@@ -283,24 +299,11 @@ namespace
 
 		renderCommandBuffer.begin(vk::CommandBufferBeginInfo{});
 
-		// Transition layout of the image descriptors before compute pipeline
-		// Raycasted image layout: undefined (default)/transferSrc -> general, expected by the descriptor
-		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, vk::ImageMemoryBarrier{
-				vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
-				, vk::AccessFlagBits::eShaderWrite
-				, fenceResult == vk::Result::eSuccess ? vk::ImageLayout::eUndefined : vk::ImageLayout::eTransferSrcOptimal
-				, vk::ImageLayout::eGeneral
-				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-				, VK_QUEUE_FAMILY_IGNORED
-				, raycastedImage
-				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-		});
-
-		if (fenceResult == vk::Result::eSuccess)
+		if (fenceResult == vk::Result::eSuccess) // One time only
 		{
-			// Volume image layout: undefined -> transferDstOptimal
-			renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
-				vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+			// Volume image layout: undefined -> transferDstOptimal, which is the expected layout when using the copy command
+			renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
+				vk::AccessFlagBits::eNone
 				, vk::AccessFlagBits::eTransferWrite
 				, vk::ImageLayout::eUndefined
 				, vk::ImageLayout::eTransferDstOptimal
@@ -325,9 +328,9 @@ namespace
 			});
 
 			// Volume image layout: transferDstOptimal -> shaderReadOnlyOptimal
-			renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, {vk::ImageMemoryBarrier{
+			renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, {vk::ImageMemoryBarrier{
 				vk::AccessFlagBits::eTransferWrite
-				, vk::AccessFlagBits::eShaderRead
+				, vk::AccessFlagBits::eNone
 				, vk::ImageLayout::eTransferDstOptimal
 				, vk::ImageLayout::eShaderReadOnlyOptimal
 				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
@@ -336,6 +339,19 @@ namespace
 				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 			}});
 		}
+
+		// Transition layout of the image descriptors before compute pipeline
+		// Raycasted image layout: undefined -> general, expected by the descriptor
+		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, vk::ImageMemoryBarrier{
+				vk::AccessFlagBits::eNone
+				, vk::AccessFlagBits::eShaderWrite
+				, vk::ImageLayout::eUndefined // Default & discard the previous contents of the raycastedImage
+				, vk::ImageLayout::eGeneral
+				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+				, VK_QUEUE_FAMILY_IGNORED
+				, raycastedImage
+				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		});
 
 		renderCommandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, computePipeline);
 		renderCommandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, computePipelineLayout, 0, descriptorSets, {}); // 3D volume data
@@ -348,8 +364,8 @@ namespace
 
 		// Barrier to sync writting to raycastedImage via compute shader and copy it to swapchain image
 		// Raycasted image layout: general -> transferSrc, before copy commmand
-		// Swapchain image layout: undefined (default)/presentSrcKHR -> transferDst, before copy command
-		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
+		// Swapchain image layout: undefined -> transferDst, before copy command
+		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
 			vk::AccessFlagBits::eShaderWrite // Compute shader writes to raycasted image, vk::AccessFlagBits::eShaderWrite, only use this when the shader write to the memory
 			, vk::AccessFlagBits::eTransferRead // Wait until raycasted image is finished written to then copy
 			, vk::ImageLayout::eGeneral
@@ -359,9 +375,9 @@ namespace
 			, raycastedImage
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		}, vk::ImageMemoryBarrier{
-			vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+			vk::AccessFlagBits::eNone
 			, vk::AccessFlagBits::eTransferWrite // Wait until raycasted image is finished written to then copy
-			, fenceResult == vk::Result::eSuccess ? vk::ImageLayout::eUndefined : vk::ImageLayout::ePresentSrcKHR
+			, vk::ImageLayout::eUndefined // Default & discard the previous contents of the swapchainImage
 			, vk::ImageLayout::eTransferDstOptimal
 			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
 			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
@@ -379,9 +395,9 @@ namespace
 
 		// Transfer the swapchain image layout back to a presentable layout
 		// Swapchain image layout: transferDst -> presentSrcKHR, before presented
-		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, vk::ImageMemoryBarrier{
-				vk::AccessFlagBits::eTransferWrite // written during the coppy command
-				, vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
+				vk::AccessFlagBits::eTransferWrite // written during the copy command
+				, vk::AccessFlagBits::eNone
 				, vk::ImageLayout::eTransferDstOptimal
 				, vk::ImageLayout::ePresentSrcKHR
 				, VK_QUEUE_FAMILY_IGNORED
@@ -439,7 +455,7 @@ namespace
 		device.destroyPipelineLayout(computePipelineLayout);
 		device.destroyShaderModule(volumeShaderModule);
 		device.destroyDescriptorSetLayout(descriptorSetLayout);
-		device.destroySampler(sampler);
+		device.destroySampler(volumeImageSampler);
 		device.destroyDescriptorPool(descriptorPool);
 		device.freeMemory(stagingBufferMemory); device.destroyBuffer(stagingBuffer);
 		device.destroyImageView(volumeImageView); device.destroyImageView(raycastedImageView);
@@ -458,6 +474,7 @@ int main()
 		, preRenderLoop
 		, renderFrame
 		, postRenderLoop
+		, "Volume Rendering"
 	};
 	application.run(runInfo);
 

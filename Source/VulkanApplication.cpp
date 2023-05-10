@@ -180,7 +180,7 @@ void VulkanApplication::run(const RunInfo& runInfo) noexcept // All exceptions a
 {
 	try
 	{
-		initWindow(); // Must be before initVulkan()
+		initWindow(runInfo.windowName); // Must be before initVulkan()
 		initVulkan(runInfo);
 		// Application info only valid after initVulkan
 		const auto applicationInfo = ApplicationInfo{
@@ -198,7 +198,7 @@ void VulkanApplication::run(const RunInfo& runInfo) noexcept // All exceptions a
 			, isCommandBufferExecutedFence
 		};
 		runInfo.preRenderLoop(applicationInfo);
-		renderLoop(runInfo.renderFrame, applicationInfo);
+		renderLoop(runInfo.renderFrame, applicationInfo, runInfo.windowName);
 		runInfo.postRenderLoop(applicationInfo);
 		cleanUp(); // Can't put in the class' destructor due to potential exceptions
 	}
@@ -208,13 +208,13 @@ void VulkanApplication::run(const RunInfo& runInfo) noexcept // All exceptions a
 	}
 }
 
-void VulkanApplication::initWindow()
+void VulkanApplication::initWindow(std::string_view windowName = "MyWindow")
 {
-	if (glfwInit() != GLFW_TRUE) throw std::runtime_error{ "Failed to initalize GLFW" };
+	if (glfwInit() != GLFW_TRUE) throw std::runtime_error{"Failed to initalize GLFW"};
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Do not create an OpenGL context
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-	window = glfwCreateWindow(WIDTH, HEIGHT, "MyWindow", nullptr, nullptr);
-	if (!window) throw std::runtime_error{ "Can't create window" };
+	window = glfwCreateWindow(WIDTH, HEIGHT, windowName.data(), nullptr, nullptr);
+	if (!window) throw std::runtime_error{"Can't create window"};
 }
 void VulkanApplication::initVulkan(const RunInfo& runInfo)
 {
@@ -368,12 +368,17 @@ void VulkanApplication::initSyncObjects()
 	isCommandBufferExecutedFence = device.createFence(fenceCreateInfo);
 }
 
-void VulkanApplication::renderLoop(const ApplicationFunction& renderFrame, const ApplicationInfo& applicationInfo)
+void VulkanApplication::renderLoop(const ApplicationFunction& renderFrame, const ApplicationInfo& applicationInfo, std::string_view windowName = "MyWindow")
 {
 	while (!glfwWindowShouldClose(window))
 	{
 		glfwPollEvents();
+		const auto preFrameRender = glfwGetTime();
 		renderFrame(applicationInfo);
+		const auto postFrameRender = glfwGetTime();
+		const auto frameRenderTime = postFrameRender - preFrameRender;
+		const auto framesPerSecond = 1 / frameRenderTime;
+		glfwSetWindowTitle(window, (std::string{windowName} + " - FPS: " + std::to_string(framesPerSecond)).data());
 	}
 	device.waitIdle(); // Wait for the queue(s) to become idle, i.e. finished executing the cmds?
 }

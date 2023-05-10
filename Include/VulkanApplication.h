@@ -14,7 +14,7 @@
 	const bool isValidationLayersEnabled = true;
 #endif
 
-	// TODO: mark constructor as explicit
+// TODO: Mark constructor as explicit
 
 namespace
 {
@@ -83,18 +83,20 @@ namespace
 struct RunInfo
 {
 	RunInfo(
-		const std::vector<std::string>& inExtraInstanceExtensions
-		, const std::vector<std::string>& inExtraDeviceExtensions
-		, vk::ImageUsageFlagBits inSwapchainImageUsage
-		, const ApplicationFunction& inPreRenderLoop
-		, const ApplicationFunction& inRenderFrame
-		, const ApplicationFunction& inPostRenderLoop
-	) : extraInstanceExtensions{inExtraInstanceExtensions}
-		, extraDeviceExtensions{inExtraDeviceExtensions}
-		, swapchainImageUsage{inSwapchainImageUsage}
-		, preRenderLoop{inPreRenderLoop}
-		, renderFrame{inRenderFrame}
-		, postRenderLoop{inPostRenderLoop}
+		const std::vector<std::string>& extraInstanceExtensions_
+		, const std::vector<std::string>& extraDeviceExtensions_
+		, vk::ImageUsageFlagBits swapchainImageUsage_
+		, const ApplicationFunction& preRenderLoop_
+		, const ApplicationFunction& renderFrame_
+		, const ApplicationFunction& postRenderLoop_
+		, std::string_view windowName_ = "MyWindow"
+	) : extraInstanceExtensions{extraInstanceExtensions_}
+		, extraDeviceExtensions{extraDeviceExtensions_}
+		, swapchainImageUsage{swapchainImageUsage_}
+		, preRenderLoop{preRenderLoop_}
+		, renderFrame{renderFrame_}
+		, postRenderLoop{postRenderLoop_}
+		, windowName{windowName_}
 	{}
 
 	// TODO: If the Application need to modifies this application, use this RunInfo struct to do so implicitly
@@ -104,6 +106,7 @@ struct RunInfo
 	const ApplicationFunction preRenderLoop; // For pipeline setup, framebuffer, layout transition, etc.
 	const ApplicationFunction renderFrame; // Buffering recording and rendering for one frame
 	const ApplicationFunction postRenderLoop; // Cleanup of pipeline and resources created via preRenderLoop(). This is called before the actual cleanUp()
+	const std::string_view windowName;
 	// TODO: Change to span<string_view>?
 	// TODO: Make class vulkan a struct so the other main application can interact with via their struct/class
 };
@@ -118,7 +121,7 @@ public:
 	void run(const RunInfo& runInfo) noexcept;
 
 private:
-	void initWindow();
+	void initWindow(std::string_view windowName);
 
 	void initVulkan(const RunInfo& runInfo);
 	void initDispatcher();
@@ -133,7 +136,7 @@ private:
 	void initCommandBuffer();
 	void initSyncObjects();
 
-	void renderLoop(const ApplicationFunction& renderFrame, const ApplicationInfo& applicationInfo);
+	void renderLoop(const ApplicationFunction& renderFrame, const ApplicationInfo& applicationInfo, std::string_view windowName);
 
 	void cleanUp();
 
