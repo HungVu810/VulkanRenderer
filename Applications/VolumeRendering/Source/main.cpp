@@ -15,7 +15,7 @@
 namespace 
 {
 	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
-	constexpr auto NUM_SLIDES = 113;
+	constexpr auto NUM_SLIDES = 113; // Ratio is 1:1:2, 2 unit of depth
 	constexpr auto SLIDE_HEIGHT = 256;
 	constexpr auto SLIDE_WIDTH = 256;
 	constexpr auto NUM_INTENSITIES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
