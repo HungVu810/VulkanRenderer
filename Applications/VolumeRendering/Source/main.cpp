@@ -47,8 +47,8 @@ namespace
 			auto ctFile = std::ifstream{ctPath, std::ios_base::binary};
 			if (!ctFile) throw std::runtime_error{"Can't open file at " + ctPath.string()};
 
-			auto intensity = uint16_t{0}; // Data is type short
-			for (; ctFile.read(reinterpret_cast<char*>(&intensity), sizeof(intensity)); dataIndex++)
+			// Volume data is of type short, mentioned in the Standford document
+			for (auto intensity = uint16_t{0}; ctFile.read(reinterpret_cast<char*>(&intensity), sizeof(intensity)); dataIndex++)
 			{
 				// Swap byte order if running on little-endian system
 				#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -62,7 +62,6 @@ namespace
 		const auto maxIntensity = *iterMax;
 		const auto normalize = [&](Intensity& intensity){ return intensity /= maxIntensity; };
 		std::ranges::for_each(intensities.data, normalize);
-		const auto iterMaxlc = std::ranges::max_element(intensities.data);
 	}
 	void initComputePipeline(const ApplicationInfo& applicationInfo)
 	{
