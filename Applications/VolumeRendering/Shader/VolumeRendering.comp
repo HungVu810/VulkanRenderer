@@ -104,6 +104,73 @@ float toAlpha(float intensity)
 	return intensity;
 }
 
+ViewPyramid initViewPyramid()
+{
+	const vec3 viewPyramidForward = vec3(0, 0, -1); // Negative z axis forward in global world basis
+	const vec3 viewPyramidUp = vec3(0, 1, 0);
+	const vec3 viewPyramidSide = cross(viewPyramidForward, viewPyramidUp);
+	const vec3 viewPyramidLocation = vec3(0, 0, 10);
+	const float viewPyramidHeight = 9.0;
+
+	// To rotate the viewPyramid forward, up and side 
+	const float pi = acos(-1);
+	const float pitchRad = 0; // Around X
+	const float yawRad = 0; // Around Y
+	const float rollRad = 0; // Around Z
+	const mat4 pitch = mat4(vec4(1, 0, 0, 0)
+						  , vec4(0, cos(pitchRad), sin(pitchRad), 0)
+						  , vec4(0, -sin(pitchRad), cos(pitchRad), 0)
+						  , vec4(0, 0, 0, 1));
+	const mat4 yaw = mat4(vec4(cos(yawRad), 0, -sin(yawRad), 0)
+						, vec4(0, 1, 0, 0)
+						, vec4(sin(yawRad), 0, cos(yawRad), 0)
+						, vec4(0, 0, 0, 1));
+	const mat4 roll = mat4(vec4(cos(rollRad), sin(rollRad), 0, 0)
+						 , vec4(-sin(rollRad), cos(rollRad), 0, 0)
+						 , vec4(0, 0, 1, 0)
+						 , vec4(0, 0, 0, 1));
+	const mat4 viewPyramidBasis = mat4(vec4(viewPyramidSide, 0) // The default view basis orientation
+						             , vec4(viewPyramidUp, 0)
+						             , vec4(viewPyramidForward, 0)
+						             , vec4(0, 0, 0, 1));
+
+	const mat4 rotatedViewPyramidBasis = roll * yaw * pitch * viewPyramidBasis; // Could just use roll/yaw/pitch if the forward axis is +z
+
+	return ViewPyramid(viewPyramidLocation, viewPyramidHeight, rotatedViewPyramidBasis[2].xyz, rotatedViewPyramidBasis[1].xyz, rotatedViewPyramidBasis[0].xyz);
+}
+
+vec3 toWorldSpace(ivec2 pixelViewportLocation, ViewPyramid viewPyramid)
+{
+	// Pixel to world space
+	const vec2 imageDimension = imageSize(raycastedImage) - 1; // [0, W) x [0, H)
+	// Each vec represent a column
+	const mat4 normalizeComponents = mat4(vec4(1 / float(imageDimension.x), 0, 0, 0)
+										, vec4(0, 1 / imageDimension.y, 0, 0)
+										, vec4(0, 0, 1, 0)
+										, vec4(0, 0, 0, 1)); // [0, W) x [0, H) -> [0, 1]^2
+	const mat4 viewportToWorld = mat4(vec4(1, 0, 0, 0)
+									, vec4(0, -1, 0, 0)
+									, vec4(0, 0, 1, 0)
+									, vec4(0, 0, 0, 1)); // [0, 1]^2 -> x : [0, 1], y : [0, -1]
+	const mat4 translatePreRotate = mat4(vec4(1, 0, 0, 0)
+							           , vec4(0, 1, 0, 0)
+							           , vec4(0, 0, 1, 0)
+							           , vec4(-0.5, 0.5, 0, 1)); // Shift x by -0.5, y by 0.5 (image grid to the center of the XY basis), and z by 1 (out of the screen). Center the image grid in the world basis
+	const mat4 rotate = mat4(vec4(viewPyramid.side, 0)
+						   , vec4(viewPyramid.up, 0)
+						   , vec4(viewPyramid.forward, 0)
+						   , vec4(0, 0, 0, 1));
+	const mat4 translatePostRotate = mat4(vec4(1, 0, 0, 0)
+							            , vec4(0, 1, 0, 0)
+							            , vec4(0, 0, 1, 0)
+							            , vec4(viewPyramid.location + viewPyramid.height * viewPyramid.forward, 1)); // Translate the pixel so that the image grid is centered with respect to the view pyramid
+	// proxyImageOrigin   = (-0.5, 0.5, 0.0)
+	// Image proxy width  = [-0.5, -0.5] = 1
+	// Image proxy height =  [0.5, -0.5] = 1
+	vec4 pixelWorldLocation = translatePostRotate * rotate * translatePreRotate * viewportToWorld * normalizeComponents * vec4(pixelViewportLocation, 0, 1);
+	return pixelWorldLocation.xyz;
+}
+
 void main()
 {
 	// NOW: Orthographic projection, with the box dimension beside its depth equals to the image dimension
@@ -116,62 +183,11 @@ void main()
 	// Rotate the camera orbit the face about 45 degree of the face's Y axis
 	// Dynamic Transfer function
 
-	ViewPyramid viewPyramid = ViewPyramid(vec3(0, 0, 10), 9, vec3(0, 0, -1), vec3(0, 1, 0), vec3(1, 0, 0));
-	vec3 cameraLocation = vec3(0, 0, 10);
-
-	const float pi = acos(-1);
-	// To rotate the forward, up and side 
-	// const float pitch = pi / 2.0;
-//	const float pitchRad = 0; // Around X
-//	const float yawRad = 0; // Around Y
-//	const float rollRad = 0; // Around Z
-//	const mat4 pitch = mat4(vec4(1, 0, 0, 0)
-//						  , vec4(0, cos(pitchRad), sin(pitchRad), 0)
-//					  	  , vec4(0, -sin(pitchRad), cos(pitchRad), 0)
-//						  , vec4(0, 0, 0, 1));
-//	const mat4 yaw = mat4(vec4(cos(yawRad), 0, -sin(yawRad), 0)
-//						, vec4(0, 1, 0, 0)
-//						, vec4(sin(yawRad), 0, cos(yawRad), 0)
-//						, vec4(0, 0, 0, 1));
-//	const mat4 roll = mat4(vec4(cos(rollRad), sin(rollRad), 0, 0)
-//						 , vec4(-sin(rollRad), cos(rollRad), 0, 0)
-//						 , vec4(0, 0, 1, 0)
-//						 , vec4(0, 0, 0, 1));
-
+	ViewPyramid viewPyramid = initViewPyramid();
 
 	// Viewport space [0, 1]^2
-	const vec4 pixelViewportLocation = vec4(gl_GlobalInvocationID.xy, 0, 1); // Pixel location in viewport space
-
-	// Pixel to world space
-	const vec3 volumeDimension = textureSize(volumnSampler, 0) - 1; // [0, W) x [0, H) x [0, D)
-	const vec2 imageDimension = imageSize(raycastedImage) - 1; // [0, W) x [0, H)
-	const mat4 normalizeComponents = mat4(vec4(1 / float(imageDimension.x), 0, 0, 0)
-										, vec4(0, 1 / imageDimension.y, 0, 0)
-										, vec4(0, 0, 1, 0)
-										, vec4(0, 0, 0, 1)); // [0, W) x [0, H) -> [0, 1]^2
-	const mat4 viewportToWorld = mat4(vec4(1, 0, 0, 0)
-									, vec4(0, -1, 0, 0)
-									, vec4(0, 0, 1, 0)
-									, vec4(0, 0, 0, 1)); // [0, 1]^2 -> x : [0, 1], y : [0, -1]
-	const mat4 translatePreRotate = mat4(vec4(1, 0, 0, 0)
-							           , vec4(0, 1, 0, 0)
-							           , vec4(0, 0, 1, 0)
-							           , vec4(-0.5, 0.5, 0, 1)); // Each vec4 represent a column. Shift x by -0.5, y by 0.5 (image grid to the center of the XY basis), and z by 1 (out of the screen)
-	const mat4 rotate = mat4(vec4(viewPyramid.side, 0)
-						   , vec4(viewPyramid.up, 0)
-						   , vec4(viewPyramid.forward, 0)
-						   , vec4(0, 0, 0, 1));
-	// Translate the image grid so that the image grid is centered with respect to the view pyramid
-	vec3 imageGridBaseLocation = viewPyramid.location + viewPyramid.height * viewPyramid.forward;
-	const mat4 translatePostRotate = mat4(vec4(1, 0, 0, 0)
-							            , vec4(0, 1, 0, 0)
-							            , vec4(0, 0, 1, 0)
-							            , vec4(imageGridBaseLocation, 1)); // Each vec4 represent a column. Shift x by -0.5, y by 0.5 (image grid to the center of the XY basis), and z by 1 (out of the screen)
-
-	// proxyImageOrigin   = (-0.5, 0.5, 0.0)
-	// Image proxy width  = [-0.5, -0.5] = 1
-	// Image proxy height =  [0.5, -0.5] = 1
-	vec4 pixelWorldLocation = translatePostRotate * rotate * translatePreRotate * viewportToWorld * normalizeComponents * pixelViewportLocation;
+	const ivec2 pixelViewportLocation = ivec2(gl_GlobalInvocationID.xy); // Pixel location in viewport space
+	const vec3 pixelWorldLocation = toWorldSpace(pixelViewportLocation, viewPyramid);
 
 	// Setup a proxy volumn origin. The dimension of the volumn matches with the sampler space [0, 1]^3
 	// Proxy volume width  = volumeMax.x - volumeMin.x == 1
@@ -189,7 +205,7 @@ void main()
 	vec3 clearColor = vec3(0, 0, 0); // For pixels that doesn't hit
 	vec3 pixelColor = vec3(0);
 
-	const Ray raycast = Ray(viewPyramid.location, normalize(pixelWorldLocation.xyz - viewPyramid.location)); // If doing orthographic, the pixel direction == viewPyramid.forward
+	const Ray raycast = Ray(viewPyramid.location, normalize(pixelWorldLocation - viewPyramid.location)); // If doing orthographic, the pixel direction == viewPyramid.forward
 	const HitInfo hitInfo = intersect(raycast, volumeMin, volumeMax);
 
 	if (!hitInfo.isHit) pixelColor = clearColor; // TODO: The outter pixels doesn't hit with the default pixel transform?
@@ -214,6 +230,6 @@ void main()
 		}
 	}
 
-	imageStore(raycastedImage, ivec2(pixelViewportLocation.xy), vec4(pixelColor, 1.0));
+	imageStore(raycastedImage, pixelViewportLocation, vec4(pixelColor, 1.0));
 }
 

@@ -377,7 +377,7 @@ void VulkanApplication::renderLoop(const ApplicationFunction& renderFrame, const
 		renderFrame(applicationInfo);
 		const auto postFrameRender = glfwGetTime();
 		const auto frameRenderTime = postFrameRender - preFrameRender;
-		const auto framesPerSecond = 1 / frameRenderTime;
+		const auto framesPerSecond = static_cast<int>(std::round(1 / frameRenderTime));
 		glfwSetWindowTitle(window, (std::string{windowName} + " - FPS: " + std::to_string(framesPerSecond)).data());
 	}
 	device.waitIdle(); // Wait for the queue(s) to become idle, i.e. finished executing the cmds?

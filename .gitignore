@@ -1,6 +1,8 @@
 Build/*
 .vs/*
 
+Applications/*/Shader/Checksums.txt
+
 # Dependencies/VulkanSDK/components.xml
 # Dependencies/VulkanSDK/Config/*
 # Dependencies/VulkanSDK/Demos/*
