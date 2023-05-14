@@ -11,9 +11,9 @@ struct ViewPyramid
 	vec3 location; // Top of the pyramid (camera, the apex)
 	float height; // Length from the top to the base of the pyramid (image grid)
 	// Camera unit vectors
-	vec3 forward; // Looking direction
-	vec3 up;
 	vec3 side;
+	vec3 up;
+	vec3 forward; // Looking direction
 };
 
 struct Ray
@@ -109,14 +109,17 @@ ViewPyramid initViewPyramid()
 	const vec3 viewPyramidForward = vec3(0, 0, -1); // Negative z axis forward in global world basis
 	const vec3 viewPyramidUp = vec3(0, 1, 0);
 	const vec3 viewPyramidSide = cross(viewPyramidForward, viewPyramidUp);
-	const vec3 viewPyramidLocation = vec3(0, 0, 10);
-	const float viewPyramidHeight = 9.0;
+	// The corners are the side of the cube if the image suddenly has edge corners due to perespective projection when adjusting the viewPyramidLocation/viewPyramidHeight
+	const vec3 viewPyramidLocation = vec3(0, -5, -0.5); // -0.5 z in the middle of the volume sample space
+	const float viewPyramidHeight = 5; // The base of the view pyramid should be ideally right on top of the side of the sampled volume
 
 	// To rotate the viewPyramid forward, up and side 
+	// Because the volume dimension is 1, rotating radian need to be small to compensate
 	const float pi = acos(-1);
-	const float pitchRad = 0; // Around X
+	const float pitchRad = pi / 2; // Around X
 	const float yawRad = 0; // Around Y
 	const float rollRad = 0; // Around Z
+
 	const mat4 pitch = mat4(vec4(1, 0, 0, 0)
 						  , vec4(0, cos(pitchRad), sin(pitchRad), 0)
 						  , vec4(0, -sin(pitchRad), cos(pitchRad), 0)
@@ -129,6 +132,7 @@ ViewPyramid initViewPyramid()
 						 , vec4(-sin(rollRad), cos(rollRad), 0, 0)
 						 , vec4(0, 0, 1, 0)
 						 , vec4(0, 0, 0, 1));
+
 	const mat4 viewPyramidBasis = mat4(vec4(viewPyramidSide, 0) // The default view basis orientation
 						             , vec4(viewPyramidUp, 0)
 						             , vec4(viewPyramidForward, 0)
@@ -136,7 +140,7 @@ ViewPyramid initViewPyramid()
 
 	const mat4 rotatedViewPyramidBasis = roll * yaw * pitch * viewPyramidBasis; // Could just use roll/yaw/pitch if the forward axis is +z
 
-	return ViewPyramid(viewPyramidLocation, viewPyramidHeight, rotatedViewPyramidBasis[2].xyz, rotatedViewPyramidBasis[1].xyz, rotatedViewPyramidBasis[0].xyz);
+	return ViewPyramid(viewPyramidLocation, viewPyramidHeight, rotatedViewPyramidBasis[0].xyz, rotatedViewPyramidBasis[1].xyz,  rotatedViewPyramidBasis[2].xyz);
 }
 
 vec3 toWorldSpace(ivec2 pixelViewportLocation, ViewPyramid viewPyramid)
@@ -178,9 +182,6 @@ void main()
 
 	// TODOOOOOOOOOO:
 	// Put the pixel transformation in a descriptor
-	// Make the face look forward
-	// Rotate the pixel grid around the sampler volume at a radius distance
-	// Rotate the camera orbit the face about 45 degree of the face's Y axis
 	// Dynamic Transfer function
 
 	ViewPyramid viewPyramid = initViewPyramid();
@@ -195,7 +196,7 @@ void main()
 	// Proxy volume depth  = volumeMax.z - volumeMin.z == 1
 	const vec3 volumeMin = vec3(-0.5, -0.5, -1); // Proxy volume origin, bottom left corner at the back
 	const vec3 volumeMax = vec3(0.5, 0.5, 0);
-	const vec3 volumeOrigin = volumeMax;
+	const vec3 volumeOrigin = vec3(-0.5, -0.5, 0); // Front top left, like sampler space
 
 	// TODO: don't do the proxy transformation, instead transform the camera postion and looking direction, make sure to update the projected image grid oritentaiton as well
 	// Camera has its own cooridate, seperated from the world cooridnate
