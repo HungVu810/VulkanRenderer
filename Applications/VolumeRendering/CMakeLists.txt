@@ -37,18 +37,20 @@ add_executable(VolumeRendering ${SOURCES} ${COMMON_SOURCES} ${INCLUDES} ${COMMON
 target_compile_features(VolumeRendering PRIVATE cxx_std_23)
 
 target_include_directories(VolumeRendering PRIVATE
-	"${SOLUTION_ROOT}/Include"
-	"${PROJECT_ROOT}/Include"
-	"${VULKAN_SDK}/Include")
+    "${SOLUTION_ROOT}/Include"
+    "${PROJECT_ROOT}/Include"
+    "${VULKAN_SDK}/Include")
 # target_link_directories
 
 # Libs
 find_package(glm CONFIG REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(cryptopp CONFIG REQUIRED)
+find_package(imgui CONFIG REQUIRED)
 target_link_libraries(VolumeRendering PRIVATE
-	${VULKAN_SDK}/Lib/vulkan-1.lib
-	glfw
-	glm::glm
-	cryptopp::cryptopp)
+    ${VULKAN_SDK}/Lib/vulkan-1.lib
+    glfw
+    glm::glm
+    cryptopp::cryptopp
+    imgui::imgui)
 

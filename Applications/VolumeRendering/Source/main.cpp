@@ -1,3 +1,8 @@
+#define USE_IMGUI 1
+#include "VulkanApplication.h"
+#include "vulkan/vulkan.hpp" // Do not place this header above the VulkanApplication.h
+#include "Shader.h"
+#include "Allocation.h"
 #include <thread> // In case of wanting more workers
 #include <cstdint> // Needed for uint32_t
 #include <limits> // Needed for std::numeric_limits
@@ -5,12 +10,14 @@
 #include <filesystem>
 #include <vector>
 #include <cassert>
-#include "VulkanApplication.h"
-#include "Shader.h"
-#include "Allocation.h"
-#include "vulkan/vulkan.hpp" // Do not place this header above the VulkanApplication.h
 
-#define APPLICATION_INFO_BINDINGS const auto& [surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, renderCommandBuffers, isAcquiredImageReadSemaphore, isImageRenderedSemaphore, isRenderCommandBufferExecutedFence] = applicationInfo;
+#define APPLICATION_INFO_BINDINGS const auto& [window, instance, surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, renderCommandBuffers, isAcquiredImageReadSemaphore, isImageRenderedSemaphore, isRenderCommandBufferExecutedFence] = applicationInfo;
+
+// TODO: imgui, imguizmo in VulkanApplication.cpp
+// constexpr, consteval
+// create a appThread class that takes works and assigned with enum of the current work
+// TODO: seperate this vuklan application into a framework to support different
+// type of graphic program, ie volumn rendering, normal mesh renderng
 
 namespace 
 {
@@ -37,7 +44,7 @@ namespace
 	vk::PipelineLayout computePipelineLayout;
 	vk::Pipeline computePipeline;
 
-	// Private helperrs
+	// Private helpers
 	void loadVolumeData()
 	{
 		auto dataIndex = 0;
@@ -264,7 +271,7 @@ namespace
 			vk::CommandBufferUsageFlagBits::eOneTimeSubmit
 		});
 
-		// Swapchain images layout: undefined -> presentSrcKHR
+		// Swapchain images layout: undefined -> presentSrcKHR. This step is needed for image acquisition in the right layout.
 		const auto swapchainImages = device.getSwapchainImagesKHR(swapchain);
 		for (const auto& image : swapchainImages)
 		{
@@ -290,7 +297,8 @@ namespace
 		device.freeCommandBuffers(commandPool, commandBuffer);
 		device.destroyCommandPool(commandPool);
 	}
-	void recordRenderCommandBuffer(const ApplicationInfo& applicationInfo, uint32_t imageIndex, vk::Result fenceResult)
+	// Split into multiple command buffer with 1 submission? set event
+	void recordRenderCommandBuffer(const ApplicationInfo& applicationInfo, uint32_t imageIndex, bool isFirstFrame)
 	{
 		APPLICATION_INFO_BINDINGS
 
@@ -298,7 +306,7 @@ namespace
 
 		renderCommandBuffer.begin(vk::CommandBufferBeginInfo{});
 
-		if (fenceResult == vk::Result::eSuccess) // One time only
+		if (isFirstFrame) // One time only
 		{
 			// Volume image layout: undefined -> transferDstOptimal, which is the expected layout when using the copy command
 			renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
@@ -398,14 +406,17 @@ namespace
 				vk::AccessFlagBits::eTransferWrite // written during the copy command
 				, vk::AccessFlagBits::eNone
 				, vk::ImageLayout::eTransferDstOptimal
-				, vk::ImageLayout::ePresentSrcKHR
+
+				//, vk::ImageLayout::ePresentSrcKHR 
+				,vk::ImageLayout::eColorAttachmentOptimal// For UI imgui
+
 				, VK_QUEUE_FAMILY_IGNORED
 				, VK_QUEUE_FAMILY_IGNORED
 				, swapchainImage
 				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 
-		renderCommandBuffer.end();
+		//renderCommandBuffer.end();
 	}
 
 	// Private render functions
@@ -416,35 +427,36 @@ namespace
 		initComputePipeline(applicationInfo);
 		submitTemporaryCommandBuffer(applicationInfo);;
 	}
-	void renderFrame(const ApplicationInfo& applicationInfo)
+	void renderFrame(const ApplicationInfo& applicationInfo, uint32_t imageIndex)
 	{
 		APPLICATION_INFO_BINDINGS
 	
-		const auto fenceResult = device.getFenceStatus(isRenderCommandBufferExecutedFence); // Only signaled in the first loop, we will use this to make proper layout transition when record the render command buffer
+		//const auto fenceResult = device.getFenceStatus(isRenderCommandBufferExecutedFence); // Only signaled in the first loop, we will use this to make proper layout transition when record the render command buffer
 	
-		// Fence and submission
-		std::ignore = device.waitForFences(isRenderCommandBufferExecutedFence, VK_TRUE, std::numeric_limits<uint64_t>::max()); // Avoid modifying the command buffer when it's in used by the device
-		device.resetFences(isRenderCommandBufferExecutedFence);
+		//// Fence and submission
+		//std::ignore = device.waitForFences(isRenderCommandBufferExecutedFence, VK_TRUE, std::numeric_limits<uint64_t>::max()); // Avoid modifying the command buffer when it's in used by the device
+		//device.resetFences(isRenderCommandBufferExecutedFence);
 	
-		const auto resultValue = device.acquireNextImageKHR(swapchain, std::numeric_limits<uint64_t>::max(), isAcquiredImageReadSemaphore); // Semaphore will be raised when the acquired image is finished reading by the engine
-		if (resultValue.result != vk::Result::eSuccess) throw std::runtime_error{"Failed to acquire the next image index."};
+		//const auto resultValue = device.acquireNextImageKHR(swapchain, std::numeric_limits<uint64_t>::max(), isAcquiredImageReadSemaphore); // Semaphore will be raised when the acquired image is finished reading by the engine
+		//if (resultValue.result != vk::Result::eSuccess) throw std::runtime_error{"Failed to acquire the next image index."};
 	
-		const auto imageIndex = resultValue.value;
-		const auto waitStages = std::vector<vk::PipelineStageFlags>{vk::PipelineStageFlagBits::eComputeShader}; // Wait the compute shader if we have inflight command buffers
-		recordRenderCommandBuffer(applicationInfo, imageIndex, fenceResult);
-		queue.submit(vk::SubmitInfo{
-			isAcquiredImageReadSemaphore // Wait for the image to be finished reading, then we will modify it via the commands in the commandBuffers
-			, waitStages 
-			, renderCommandBuffers
-			, isImageRenderedSemaphore // Raise when finished executing the commands
-		}, isRenderCommandBufferExecutedFence); // Raise when finished executing the commands
+		//const auto imageIndex = resultValue.value;
+		//const auto waitStages = std::vector<vk::PipelineStageFlags>{vk::PipelineStageFlagBits::eComputeShader}; // Wait the compute shader if we have inflight command buffers
+		//recordRenderCommandBuffer(applicationInfo, imageIndex, fenceResult);
+
+		//queue.submit(vk::SubmitInfo{
+		//	isAcquiredImageReadSemaphore // Wait for the image to be finished reading, then we will modify it via the commands in the commandBuffers
+		//	, waitStages 
+		//	, renderCommandBuffers
+		//	, isImageRenderedSemaphore // Raise when finished executing the commands
+		//}, isRenderCommandBufferExecutedFence); // Raise when finished executing the commands
 	
-		const auto presentResult = queue.presentKHR(vk::PresentInfoKHR{
-			isImageRenderedSemaphore
-			, swapchain
-			, imageIndex
-		});
-		if (presentResult != vk::Result::eSuccess) throw std::runtime_error{"Failed to present image."};
+		//const auto presentResult = queue.presentKHR(vk::PresentInfoKHR{
+		//	isImageRenderedSemaphore
+		//	, swapchain
+		//	, imageIndex
+		//});
+		//if (presentResult != vk::Result::eSuccess) throw std::runtime_error{"Failed to present image."};
 	}
 	void postRenderLoop(const ApplicationInfo& applicationInfo)
 	{
@@ -471,7 +483,7 @@ int main()
 		, {}
 		, vk::ImageUsageFlagBits::eTransferDst
 		, preRenderLoop
-		, renderFrame
+		, recordRenderCommandBuffer //renderFrame
 		, postRenderLoop
 		, "Volume Rendering"
 	};

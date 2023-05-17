@@ -202,7 +202,7 @@ void main()
 	// Camera has its own cooridate, seperated from the world cooridnate
 	// Camera transformation matrix is given to the image grid as well
 
-	uint samples = 10; // The samples >= 0 within the 2 defaults samples at each extremes tMin and tMax, 113 slides
+	uint samples = 30; // The samples >= 0 within the 2 defaults samples at each extremes tMin and tMax, 113 slides
 	vec3 clearColor = vec3(0, 0, 0); // For pixels that doesn't hit
 	vec3 pixelColor = vec3(0);
 

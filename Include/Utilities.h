@@ -9,6 +9,7 @@
 #include <cassert>
 #include <iostream>
 #include <type_traits>
+#include <functional>
 
 namespace tag
 {
@@ -53,8 +54,8 @@ constexpr auto toVulkanFormat()
 }
 
 // inlines/constexpr healpers
-constexpr auto isAlpha = [](char c){return std::isalpha(c);};  // This is used as algorithm/ranges functor
-constexpr auto print = [](const auto& in) { std::cout << in << '\n'; };
+inline constexpr auto isAlpha = [](char c){return std::isalpha(c);};  // This is used as algorithm/ranges functor
+inline constexpr auto print = [](const auto& in) { std::cout << in << '\n'; };
 inline constexpr void assertm(bool condition, std::string_view message)
 {
 	if (!condition)
@@ -86,6 +87,20 @@ inline constexpr void assertm(bool condition, std::string_view message)
 {
 	return std::views::zip(std::views::iota(0U, container.size()), container);
 }
+inline void submitCommandBufferOnceSynced(const vk::Device& device, const vk::Queue& queue, const vk::CommandBuffer& commandBuffer, const std::function<void(const vk::CommandBuffer& commandBuffer)>& commands) // Synced means the host will wait on the device queue to finish it works
+{
+	const auto waitFence = device.createFence(vk::FenceCreateInfo{});
+	commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+	commands(commandBuffer);
+	commandBuffer.end();
+	queue.submit(vk::SubmitInfo{{}, {}, commandBuffer}, waitFence);
+	std::ignore = device.waitForFences(waitFence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+	device.destroy(waitFence);
+}
+inline void checkVkResult(VkResult result) // For C-API
+{
+	if (result != VK_SUCCESS) throw std::runtime_error{"Failed to init ImGUI."};
+};
 
 // Normal helpers
 [[nodiscard]] std::string getChecksum(const std::filesystem::path& path);

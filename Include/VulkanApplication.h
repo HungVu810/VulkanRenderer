@@ -3,10 +3,13 @@
 #include <GLFW/glfw3.h>
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
+#include "Utilities.h"
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_vulkan.h"
 #include <iostream>
 #include <vector>
 #include <functional>
-#include "Utilities.h"
 
 #ifdef NDEBUG
 	const bool isValidationLayersEnabled = false;
@@ -25,7 +28,7 @@ namespace
 
 	constexpr auto WIDTH = uint32_t{800}; // 800, 1280
 	constexpr auto HEIGHT = uint32_t{800}; // 800, 720
-	// constexpr auto MAX_INFLIGHT_IMAGES = 2; // The swapchain support at least 2 presentable images
+	constexpr auto MAX_INFLIGHT_IMAGES = 1; // Ideal 2, Number of images being simutaneously processed by the CPU and the GPU
 
 	// Public helpers
 	[[nodiscard]] auto inline getQueueFamilyIndices(const std::vector<QueueFamily>& queueFamilies)
@@ -61,6 +64,8 @@ struct SyncObjects
 };
 struct ApplicationInfo
 {
+	GLFWwindow* window;
+	const vk::Instance instance;
 	const vk::SurfaceKHR surface;
 	const vk::PhysicalDevice physicalDevice;
 	const vk::Device device;
@@ -78,6 +83,7 @@ struct ApplicationInfo
 namespace
 {
 	using ApplicationFunction = std::function<void(const ApplicationInfo&)>;
+	using RenderFrameFunction = std::function<void(const ApplicationInfo&, uint32_t imageIndex, bool isFirstFrame)>; // isFirstFrame is used for one-time-only command recordings
 }
 
 struct RunInfo
@@ -87,7 +93,7 @@ struct RunInfo
 		, const std::vector<std::string>& extraDeviceExtensions_
 		, vk::ImageUsageFlagBits swapchainImageUsage_
 		, const ApplicationFunction& preRenderLoop_
-		, const ApplicationFunction& renderFrame_
+		, const RenderFrameFunction& renderFrame_
 		, const ApplicationFunction& postRenderLoop_
 		, std::string_view windowName_ = "MyWindow"
 	) : extraInstanceExtensions{extraInstanceExtensions_}
@@ -104,7 +110,7 @@ struct RunInfo
 	const std::vector<std::string> extraDeviceExtensions;
 	const vk::ImageUsageFlagBits swapchainImageUsage;
 	const ApplicationFunction preRenderLoop; // For pipeline setup, framebuffer, layout transition, etc.
-	const ApplicationFunction renderFrame; // Buffering recording and rendering for one frame
+	const RenderFrameFunction renderFrame; // Buffering recording and rendering for one frame
 	const ApplicationFunction postRenderLoop; // Cleanup of pipeline and resources created via preRenderLoop(). This is called before the actual cleanUp()
 	const std::string_view windowName;
 	// TODO: Change to span<string_view>?
@@ -131,12 +137,22 @@ private:
 	void initPhysicalDevice();
 	void initDevice();
 	void initQueue();
-	void initSwapChain(vk::ImageUsageFlagBits swapchainImageUsage);
+	// void initSwapChain(vk::ImageUsageFlagBits swapchainImageUsage);
+	void initSwapChain();
 	void initCommandPool();
 	void initCommandBuffer();
 	void initSyncObjects();
 
-	void renderLoop(const ApplicationFunction& renderFrame, const ApplicationInfo& applicationInfo, std::string_view windowName);
+	void initImGui();
+	void initImGuiDescriptorPool();
+	void initImGuiImageViews();
+	void initImGuiRenderPass();
+	void initImGuiFrameBuffer();
+	void initImGuiCommandPool();
+	void initImGuiCommandBuffer();
+
+	void renderLoop(const RenderFrameFunction& renderFrame, const ApplicationInfo& applicationInfo, std::string_view windowName);
+	void renderImGui();
 
 	void cleanUp();
 
@@ -173,6 +189,14 @@ private:
 	vk::Semaphore isAcquiredImageReadSemaphore;
 	vk::Semaphore isImageRenderedSemaphore;
 	vk::Fence isCommandBufferExecutedFence;
+
+	// TODO: a macro 
+	vk::RenderPass imguiRenderPass;
+	std::vector<vk::ImageView> imguiSwapchainImageViews;
+	vk::DescriptorPool imguiDescriptorPool;
+	std::vector<vk::Framebuffer> imguiFramebuffers;
+	vk::CommandPool imguiCommandPool;
+	std::vector<vk::CommandBuffer> imguiCommandBuffers;
 };
 
 
