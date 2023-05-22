@@ -1,10 +1,13 @@
+#include "VulkanApplication.h" // Do not place this right above the VULKAN_HPP_DEFAULT macro
+#include "Utilities.h"
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_vulkan.h"
 #include <ranges>
 #include <algorithm>
 #include <stdexcept>
 #include <cstdint> // Needed for uint32_t
 #include <limits> // Needed for std::numeric_limits
-#include "VulkanApplication.h" // Do not place this right above the VULKAN_HPP_DEFAULT macro
-#include "Utilities.h"
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 namespace
@@ -201,13 +204,10 @@ void VulkanApplication::run(const RunInfo& runInfo) noexcept // All exceptions a
 			, swapchain
 			, surfaceFormat.format
 			, surfaceExtent
-			, commandBuffers
-			, isAcquiredImageReadSemaphore
-			, isImageRenderedSemaphore
-			, isCommandBufferExecutedFence
+			, commandBuffers.front()
 		};
 		runInfo.preRenderLoop(applicationInfo);
-		renderLoop(runInfo.renderFrame, applicationInfo, runInfo.windowName);
+		renderLoop(runInfo.recordRenderingCommands, applicationInfo, runInfo.imguiCommands, runInfo.windowName);
 		runInfo.postRenderLoop(applicationInfo);
 		cleanUp(); // Can't put in the class' destructor due to potential exceptions
 	}
@@ -237,7 +237,6 @@ void VulkanApplication::initVulkan(const RunInfo& runInfo)
 	initDevice();
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(device); // Extend dispatcher to device dependent EXT function pointers
 	initQueue();
-	//initSwapChain(runInfo.swapchainImageUsage);
 	initSwapChain();
 	initCommandPool();
 	initCommandBuffer();
@@ -325,14 +324,22 @@ void VulkanApplication::initSwapChain()
 {
 	const auto surfaceAttributes = getSurfaceAttributes(surface, physicalDevice);
 	surfaceFormat = getSuitableSurfaceFormat(surfaceAttributes.formats);
+	// Check if the surface format supports the future usages
+	checkFormatFeatures(physicalDevice, surfaceFormat.format, vk::FormatFeatureFlagBits::eColorAttachment);
+	checkFormatFeatures(physicalDevice, surfaceFormat.format, vk::FormatFeatureFlagBits::eTransferDst);
+
 	surfaceExtent = getSuitableSurfaceExtent(window, surfaceAttributes.capabilities);
+
 	const auto presentMode = getSuitablePresentMode(surfaceAttributes.presentModes);
+
 	auto imageCount = surfaceAttributes.capabilities.minImageCount + 1;
 	if (surfaceAttributes.capabilities.maxImageCount != 0) // Not infinite
 	{
 		imageCount = std::min(imageCount, surfaceAttributes.capabilities.maxImageCount);
 	}
+
 	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
+
 	vk::SwapchainCreateInfoKHR createInfo{
 		{}
 		, surface
@@ -380,27 +387,17 @@ void VulkanApplication::initSyncObjects()
 	isCommandBufferExecutedFence = device.createFence(fenceCreateInfo);
 }
 
+//TODO: Don't share imgui renderpass with application renderpass, do this first beforer attempt the below
 //TODO: Check if the runInfo already provdie a renderpass, grpahic pipeline, framebuffer,...?
 
-void VulkanApplication::initImGui() // https://github.com/ocornut/imgui/blob/master/examples/example_glfw_vulkan/main.cpp
+void VulkanApplication::initImGui()
 {
-	// Imgui is layered onto top of our window
-	// See example_glfw_vulkan and imgui_impl_vulkan.cpp
+	// C:\dev\vcpkg\buildtrees\imgui\src
+	// https://github.com/ocornut/imgui/wiki
+	// Imgui is layered onto top of our window, see imgui_demo.cpp, example_glfw_vulkan.cpp, and imgui_impl_vulkan.cpp
+	// All the ImGui_ImplVulkanH_XXX structures/functions are optional helpers used by the demo
 
-// #ifdef USE_IMGUI && USE_IMGUI == 1
-	// Pass the imguiWindow this to the applicatoininfo
-	// application only setup begin/end of window, the vulkanapplication manage frame inddex imgui
-	// All the ImGui_ImplVulkanH_XXX structures/functions are optional helpers used by the demo.
-
-	//IM_ASSERT(wd->Frames == nullptr);
-	//wd->Frames = (ImGui_ImplVulkanH_Frame*)IM_ALLOC(sizeof(ImGui_ImplVulkanH_Frame) * wd->ImageCount);
-	//wd->FrameSemaphores = (ImGui_ImplVulkanH_FrameSemaphores*)IM_ALLOC(sizeof(ImGui_ImplVulkanH_FrameSemaphores) * wd->ImageCount);
-	//memset(wd->Frames, 0, sizeof(wd->Frames[0]) * wd->ImageCount);
-	//memset(wd->FrameSemaphores, 0, sizeof(wd->FrameSemaphores[0]) * wd->ImageCount);
-	//for (uint32_t i = 0; i < wd->ImageCount; i++)
-	//    wd->Frames[i].Backbuffer = backbuffers[i];
-
-	// Reserved for ImGui
+	// Reserved for imgui
 	initImGuiDescriptorPool();
 	initImGuiRenderPass();
 	initImGuiImageViews();
@@ -414,7 +411,7 @@ void VulkanApplication::initImGui() // https://github.com/ocornut/imgui/blob/mas
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
 	//io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
 	//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-	//TODO: variable Toggle imgui log messages
+	//TODO: A variable to toggle imgui log messages
 
 	// Setup Dear ImGui style
 	ImGui::StyleColorsDark();
@@ -445,10 +442,7 @@ void VulkanApplication::initImGui() // https://github.com/ocornut/imgui/blob/mas
 			ImGui_ImplVulkan_CreateFontsTexture(commandBuffer);
 	});
 	ImGui_ImplVulkan_DestroyFontUploadObjects();
-
-// #endif
 }
-
 void VulkanApplication::initImGuiDescriptorPool()
 {
 	const auto descriptorPoolSizes = std::vector<vk::DescriptorPoolSize>{
@@ -561,8 +555,24 @@ void VulkanApplication::initImGuiCommandBuffer()
 	};
 	imguiCommandBuffers = device.allocateCommandBuffers(allocateInfo);
 }
+void VulkanApplication::cleanupImGui()
+{
+	device.freeCommandBuffers(imguiCommandPool, imguiCommandBuffers);
+	device.destroyCommandPool(imguiCommandPool);
+	for (const auto framebuffer : imguiFramebuffers)
+	{
+		device.destroyFramebuffer(framebuffer);
+	}
+	device.destroyDescriptorPool(imguiDescriptorPool);
+	for (const auto imageview : imguiSwapchainImageViews)
+	{
+		device.destroyImageView(imageview);
+	}
+	device.destroyRenderPass(imguiRenderPass);
+	ImGui_ImplVulkan_Shutdown();
+}
 
-void VulkanApplication::renderLoop(const RenderFrameFunction& renderFrame, const ApplicationInfo& applicationInfo, std::string_view windowName = "MyWindow") // Always render in the order from the back to the front with respect to the viewport depth
+void VulkanApplication::renderLoop(const RenderFrameFunction& recordRenderingCommands, const ApplicationInfo& applicationInfo, const DelegateFunction& imguiCommands, std::string_view windowName = "MyWindow") // Always render in the order from the back to the front with respect to the viewport depth
 {
 	// Must have an event to prevent data race between the imgui command buffer and the application rendr ocmmand buufer if they read/write to a descriptor
 	const auto renderCommandBufferEvent = device.createEvent(vk::EventCreateInfo{vk::EventCreateFlagBits::eDeviceOnly});
@@ -590,17 +600,16 @@ void VulkanApplication::renderLoop(const RenderFrameFunction& renderFrame, const
 		///////////////////////
 		// TODO: keep vk::ImageUsageFlagBits::eColorAttachment as the default for swapchain images, make sure the application transfer back to this attachment in order for it to be used by imgui
 		///////////////////////
-		renderFrame(applicationInfo, imageIndex, isFirstFrame); // renderrFrame = a function with command to be exeuted only?
 		const auto commandBuffer = commandBuffers.front(); // rendercomandbuffer
+		commandBuffer.begin(vk::CommandBufferBeginInfo{});
+		recordRenderingCommands(applicationInfo, imageIndex, isFirstFrame); // renderrFrame = a function with command to be exeuted only?
 		commandBuffer.setEvent(renderCommandBufferEvent, vk::PipelineStageFlagBits::eComputeShader);
 		commandBuffer.end();
 
 		// Imgui is likely to share resource with the applicationss' commandbuffers commands, sync this imguiCommandbuffer and the application render commandbuffer
 
-		ImGui::ShowDemoWindow();
-		//// For each imgui window
-		//ImGui::Begin("Hello, world!");
-		//ImGui::End();
+		imguiCommands();
+
         ImGui::Render(); // Get the user inputs from imgui first then we will construct a frame with them
         ImDrawData* draw_data = ImGui::GetDrawData();
 		//FrameRender(wd, draw_data); ------------------------------------------
@@ -648,27 +657,11 @@ void VulkanApplication::renderLoop(const RenderFrameFunction& renderFrame, const
 	device.waitIdle(); // Wait for all the fences to be unsignaled before clean up
 
 	device.destroyEvent(renderCommandBufferEvent);
-	device.freeCommandBuffers(imguiCommandPool, imguiCommandBuffers);
-	device.destroyCommandPool(imguiCommandPool);
-	for (const auto framebuffer : imguiFramebuffers)
-	{
-		device.destroyFramebuffer(framebuffer);
-	}
-	device.destroyDescriptorPool(imguiDescriptorPool);
-	for (const auto imageview : imguiSwapchainImageViews)
-	{
-		device.destroyImageView(imageview);
-	}
-	device.destroyRenderPass(imguiRenderPass);
-}
-
-void VulkanApplication::renderImGui()
-{
 }
 
 void VulkanApplication::cleanUp() // Destroy the objects in reverse order of their creation order
 {
-	ImGui_ImplVulkan_Shutdown();
+	cleanupImGui();
 	device.destroy(isAcquiredImageReadSemaphore);
 	device.destroy(isImageRenderedSemaphore);
 	device.destroy(isCommandBufferExecutedFence);

@@ -289,7 +289,7 @@ void VulkanApplication::initFrameBuffer()
 
 
  // This is not the default so make it into a seperate application as a triangle demo
-void VulkanApplication::recordCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex)
+void VulkanApplication::recordRenderingCommands(vk::CommandBuffer& commandBuffer, uint32_t imageIndex)
 {
 	commandBuffer.reset();
 	const auto commandBufferBeginInfo = vk::CommandBufferBeginInfo{};
@@ -321,7 +321,7 @@ void VulkanApplication::drawFrame()
 	// Record and submit commandbuffer for that image
 	const auto imageIndex = resultValue.value;
 	auto& commandBuffer = commandBuffers.front();
-	recordCommandBuffer(commandBuffer, imageIndex);
+	recordRenderingCommands(commandBuffer, imageIndex);
 	const auto stages = {vk::PipelineStageFlagBits::eColorAttachmentOutput};
 	const auto waitStages = stages | std::ranges::to<std::vector<vk::PipelineStageFlags>>(); 
 	auto submitInfo = vk::SubmitInfo{isAcquiredImageReadSemaphore, waitStages, commandBuffer, isImageRenderedSemaphore};
@@ -362,7 +362,7 @@ void VulkanApplication::renderLoop()
 
 // render loop
 void mainLoop();
-void recordCommandBuffer(vk::CommandBuffer& commandBuffer, uint32_t imageIndex);
+void recordRenderingCommands(vk::CommandBuffer& commandBuffer, uint32_t imageIndex);
 void drawFrame();
 
 

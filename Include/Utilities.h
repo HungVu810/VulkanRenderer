@@ -5,6 +5,8 @@
 #include "glm/vec4.hpp"
 #include <filesystem>
 #include <ranges>
+#include <algorithm>
+#include <numeric>
 #include <fstream>
 #include <cassert>
 #include <iostream>
@@ -53,7 +55,8 @@ constexpr auto toVulkanFormat()
 	else return vk::Format::eUndefined;
 }
 
-// inlines/constexpr healpers
+/* Inline/Lambda helpers ======================================== */
+// Lambdas
 inline constexpr auto isAlpha = [](char c){return std::isalpha(c);};  // This is used as algorithm/ranges functor
 inline constexpr auto print = [](const auto& in) { std::cout << in << '\n'; };
 inline constexpr void assertm(bool condition, std::string_view message)
@@ -64,6 +67,8 @@ inline constexpr void assertm(bool condition, std::string_view message)
 		assert(false);
 	}
 }
+
+// General
 [[nodiscard]] inline auto unquotePathString(const std::filesystem::path& path) // Remove quotes returned by path.string()
 {
 	auto stringStreamPath = std::stringstream{path.string()};
@@ -87,22 +92,19 @@ inline constexpr void assertm(bool condition, std::string_view message)
 {
 	return std::views::zip(std::views::iota(0U, container.size()), container);
 }
-inline void submitCommandBufferOnceSynced(const vk::Device& device, const vk::Queue& queue, const vk::CommandBuffer& commandBuffer, const std::function<void(const vk::CommandBuffer& commandBuffer)>& commands) // Synced means the host will wait on the device queue to finish it works
+template<typename AccumulatedType = int> // The type of the values produced from the accumulated chunks
+[[nodiscard]] inline auto accumulateChunks(const auto& container, int width = 1) // {0, 1, 2, 3, 4, 5} -> {6, 9} with width = 4, ie 2 accumulated chunks {0, 1, 2, 3} and {4, 5}
 {
-	const auto waitFence = device.createFence(vk::FenceCreateInfo{});
-	commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
-	commands(commandBuffer);
-	commandBuffer.end();
-	queue.submit(vk::SubmitInfo{{}, {}, commandBuffer}, waitFence);
-	std::ignore = device.waitForFences(waitFence, VK_TRUE, std::numeric_limits<uint64_t>::max());
-	device.destroy(waitFence);
+	assert(width > 0 && width <= container.size());
+	return container
+		| std::views::chunk(width)
+		| std::views::transform([](const auto& chunk){return std::accumulate(chunk.begin(), chunk.end(), static_cast<AccumulatedType>(0)); }) // Cast 0 to double instead of the 0 (int) to prevent the accumulate from casting the value to int
+		| std::ranges::to<std::vector>();
 }
-inline void checkVkResult(VkResult result) // For C-API
-{
-	if (result != VK_SUCCESS) throw std::runtime_error{"Failed to init ImGUI."};
-};
+/* Inline/Lambda helpers ======================================== */
 
-// Normal helpers
+/* Normal helpers =============================================== */
+// Shader
 [[nodiscard]] std::string getChecksum(const std::filesystem::path& path);
-
+/* Normal helpers =============================================== */
 

@@ -1,8 +1,8 @@
-#define USE_IMGUI 1
 #include "VulkanApplication.h"
 #include "vulkan/vulkan.hpp" // Do not place this header above the VulkanApplication.h
 #include "Shader.h"
 #include "Allocation.h"
+#include "imgui.h"
 #include <thread> // In case of wanting more workers
 #include <cstdint> // Needed for uint32_t
 #include <limits> // Needed for std::numeric_limits
@@ -11,16 +11,22 @@
 #include <vector>
 #include <cassert>
 
-#define APPLICATION_INFO_BINDINGS const auto& [window, instance, surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, renderCommandBuffers, isAcquiredImageReadSemaphore, isImageRenderedSemaphore, isRenderCommandBufferExecutedFence] = applicationInfo;
+#define APPLICATION_INFO_BINDINGS const auto& [window, instance, surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, commandBuffer] = applicationInfo;
 
 // TODO: imgui, imguizmo in VulkanApplication.cpp
 // constexpr, consteval
 // create a appThread class that takes works and assigned with enum of the current work
 // TODO: seperate this vuklan application into a framework to support different
 // type of graphic program, ie volumn rendering, normal mesh renderng
+// TODO: Split into multiple command buffer with 1 submission? Set event
+// If application want multiple command buffer, it should create its own beside the provided one via ApplicationInfo
 
 namespace 
 {
+	// TODO: use this
+	constexpr auto USE_IMGUI = true;
+	constexpr auto HISTOGRAM_SAMPLE_COUNT = 2000; // For displaying volume data via imgui as a representation
+
 	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
 	constexpr auto NUM_SLIDES = 113; // Ratio is 1:1:2, 2 unit of depth
 	constexpr auto SLIDE_HEIGHT = 256;
@@ -30,7 +36,8 @@ namespace
 
 	// z-y-x order, contains all intensity values of each slide images. Tightly packed
 	// vector instead of array bececause NUM_INTENSITIES is large, occupy the heap instead
-	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // Check 
+	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // The actual data used for sampling
+	auto histogram = std::vector<Intensity>{}; // For imgui
 	auto shaderMap = std::unordered_map<std::string, Shader>{};
 	vk::Image raycastedImage; vk::DeviceMemory raycastedImageMemory;
 	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory;
@@ -64,11 +71,20 @@ namespace
 				intensities.data[dataIndex] = intensity;
 			}
 		}
-		// Normalize the data
+		// Normalize the data to [0, 1]
 		const auto iterMax = std::ranges::max_element(intensities.data);
 		const auto maxIntensity = *iterMax;
 		const auto normalize = [&](Intensity& intensity){ return intensity /= maxIntensity; };
 		std::ranges::for_each(intensities.data, normalize);
+	}
+	void prepareHistogramVolumeData()
+	{
+		const auto width = intensities.data.size() / HISTOGRAM_SAMPLE_COUNT; // Rounded down implicitly, target samples >= HISTOGRAM_SAMPLE_COUNT
+		assertm(width > 0 && width <= intensities.data.size(), "Invalid HISTOGRAM_SAMPLE_COUNT");
+		histogram = intensities.data
+			| std::views::chunk(width)
+			| std::views::transform([](const auto& chunk){return std::accumulate(chunk.begin(), chunk.end(), static_cast<Intensity>(0)) / chunk.size();}) // Average the accumulated value of the current chunk
+			| std::ranges::to<std::vector<Intensity>>();
 	}
 	void initComputePipeline(const ApplicationInfo& applicationInfo)
 	{
@@ -246,70 +262,19 @@ namespace
 		if (resultValue.result != vk::Result::eSuccess) throw std::runtime_error{"Unable to create a compute pipeline."};
 		computePipeline = resultValue.value;
 	}
-	void submitTemporaryCommandBuffer(const ApplicationInfo& applicationInfo)
-	{
-		// Purpose of this temporary commandBuffer submission:
-		// Layout transition of the swapchain images to presentSrcKHR (PRESENTABLE IMAGE) in order to acquire the image index during the rendering loop without causing error
 
-		APPLICATION_INFO_BINDINGS
-
-		const auto queueFamilyIndex = getQueueFamilyIndices(queueFamilies).front(); // TODO: Use the first queueFamilyIndex for now
-
-		const auto commandPool = device.createCommandPool(vk::CommandPoolCreateInfo{
-			vk::CommandPoolCreateFlagBits::eTransient
-			, queueFamilyIndex
-		});
-		const auto commandBuffers = device.allocateCommandBuffers(vk::CommandBufferAllocateInfo{
-			commandPool
-			, vk::CommandBufferLevel::ePrimary
-			, 1
-		});
-		const auto commandBuffer = commandBuffers.front();
-
-		// Recording
-		commandBuffer.begin(vk::CommandBufferBeginInfo{
-			vk::CommandBufferUsageFlagBits::eOneTimeSubmit
-		});
-
-		// Swapchain images layout: undefined -> presentSrcKHR. This step is needed for image acquisition in the right layout.
-		const auto swapchainImages = device.getSwapchainImagesKHR(swapchain);
-		for (const auto& image : swapchainImages)
-		{
-			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, vk::ImageMemoryBarrier{
-				vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
-				, vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
-				, vk::ImageLayout::eUndefined
-				, vk::ImageLayout::ePresentSrcKHR
-				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-				, VK_QUEUE_FAMILY_IGNORED
-				, image
-				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-			});
-		}
-
-		// End recording
-		commandBuffer.end();
-
-		// Submit to transfer queue
-		queue.submit({}, {});
-		queue.waitIdle();
-
-		device.freeCommandBuffers(commandPool, commandBuffer);
-		device.destroyCommandPool(commandPool);
-	}
-	// Split into multiple command buffer with 1 submission? set event
-	void recordRenderCommandBuffer(const ApplicationInfo& applicationInfo, uint32_t imageIndex, bool isFirstFrame)
+	// Private render functions
+	void preRenderLoop(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
 
-		const auto& renderCommandBuffer = renderCommandBuffers.front(); // TODO: Use the first command buffer for now
-
-		renderCommandBuffer.begin(vk::CommandBufferBeginInfo{});
-
-		if (isFirstFrame) // One time only
-		{
+		loadVolumeData();
+		prepareHistogramVolumeData();
+		validateShaders(shaderMap);
+		initComputePipeline(applicationInfo);
+		submitCommandBufferOnceSynced(device, queue, commandBuffer, [&](const vk::CommandBuffer& commandBuffer){
 			// Volume image layout: undefined -> transferDstOptimal, which is the expected layout when using the copy command
-			renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
+			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
 				vk::AccessFlagBits::eNone
 				, vk::AccessFlagBits::eTransferWrite
 				, vk::ImageLayout::eUndefined
@@ -319,8 +284,8 @@ namespace
 				, volumeImage
 				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 			}});
-
-			renderCommandBuffer.copyBufferToImage(stagingBuffer, volumeImage, vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy{
+			// Copy the volume data from the staging buffer to the volume image used by the descriptor
+			commandBuffer.copyBufferToImage(stagingBuffer, volumeImage, vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy{
 				0
 				, 0
 				, 0
@@ -332,10 +297,9 @@ namespace
 				}
 				, vk::Offset3D{0, 0, 0}
 				, vk::Extent3D{SLIDE_WIDTH, SLIDE_HEIGHT, NUM_SLIDES}
-			});
-
+				});
 			// Volume image layout: transferDstOptimal -> shaderReadOnlyOptimal
-			renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, {vk::ImageMemoryBarrier{
+			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, {vk::ImageMemoryBarrier{
 				vk::AccessFlagBits::eTransferWrite
 				, vk::AccessFlagBits::eNone
 				, vk::ImageLayout::eTransferDstOptimal
@@ -345,11 +309,33 @@ namespace
 				, volumeImage
 				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 			}});
-		}
+			// Swapchain images layout: undefined -> presentSrcKHR. Layout transition of the swapchain images to presentSrcKHR (PRESENTABLE IMAGE) in order to acquire the image index during the rendering loop without causing error
+			const auto swapchainImages = device.getSwapchainImagesKHR(swapchain);
+			for (const auto& image : swapchainImages)
+			{
+				commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, vk::ImageMemoryBarrier{
+					vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+					, vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+					, vk::ImageLayout::eUndefined
+					, vk::ImageLayout::ePresentSrcKHR
+					, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+					, VK_QUEUE_FAMILY_IGNORED
+					, image
+					, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+				});
+			}
+		});
+	}
+
+	// TODO: Create a struct RenderFrame in RunInfo that accept a recording function and an optional imgui commands function, will be check against the USE_IMGUI var
+	// Remove isFirstFrame
+	void recordRenderingCommands(const ApplicationInfo& applicationInfo, uint32_t imageIndex, bool isFirstFrame)
+	{
+		APPLICATION_INFO_BINDINGS
 
 		// Transition layout of the image descriptors before compute pipeline
 		// Raycasted image layout: undefined -> general, expected by the descriptor
-		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, vk::ImageMemoryBarrier{
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, vk::ImageMemoryBarrier{
 				vk::AccessFlagBits::eNone
 				, vk::AccessFlagBits::eShaderWrite
 				, vk::ImageLayout::eUndefined // Default & discard the previous contents of the raycastedImage
@@ -360,19 +346,19 @@ namespace
 				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 
-		renderCommandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, computePipeline);
-		renderCommandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, computePipelineLayout, 0, descriptorSets, {}); // 3D volume data
+		commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, computePipeline);
+		commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, computePipelineLayout, 0, descriptorSets, {}); // 3D volume data
 		const auto numInvocationPerX = 10; // Also put this number in the compute shader
 		const auto numInvocationPerY = 10; // Also put this number in the compute shader
 		assert((WIDTH % numInvocationPerX) == 0 && (HEIGHT % numInvocationPerY) == 0);
-		renderCommandBuffer.dispatch(WIDTH / numInvocationPerX, HEIGHT / numInvocationPerY, 1); // *******NOTE: group size must be at least 1
+		commandBuffer.dispatch(WIDTH / numInvocationPerX, HEIGHT / numInvocationPerY, 1); // NOTE: group size must be at least 1 for all x, y, z
 
 		const auto swapchainImage = device.getSwapchainImagesKHR(swapchain)[imageIndex];
 
 		// Barrier to sync writting to raycastedImage via compute shader and copy it to swapchain image
 		// Raycasted image layout: general -> transferSrc, before copy commmand
 		// Swapchain image layout: undefined -> transferDst, before copy command
-		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
 			vk::AccessFlagBits::eShaderWrite // Compute shader writes to raycasted image, vk::AccessFlagBits::eShaderWrite, only use this when the shader write to the memory
 			, vk::AccessFlagBits::eTransferRead // Wait until raycasted image is finished written to then copy
 			, vk::ImageLayout::eGeneral
@@ -392,7 +378,8 @@ namespace
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		}});
 
-		renderCommandBuffer.copyImage(raycastedImage, vk::ImageLayout::eTransferSrcOptimal, swapchainImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageCopy{
+		// Copy data from the rendered raycasted image via the compute shader to the current swapchain image
+		commandBuffer.copyImage(raycastedImage, vk::ImageLayout::eTransferSrcOptimal, swapchainImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageCopy{
 				vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
 				, {0, 0, 0}
 				, vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
@@ -402,62 +389,41 @@ namespace
 
 		// Transfer the swapchain image layout back to a presentable layout
 		// Swapchain image layout: transferDst -> presentSrcKHR, before presented
-		renderCommandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
 				vk::AccessFlagBits::eTransferWrite // written during the copy command
 				, vk::AccessFlagBits::eNone
 				, vk::ImageLayout::eTransferDstOptimal
-
-				//, vk::ImageLayout::ePresentSrcKHR 
-				,vk::ImageLayout::eColorAttachmentOptimal// For UI imgui
-
+				, vk::ImageLayout::eColorAttachmentOptimal// For UI imgui renderpass. Will be transtioned into presentSrcKHR at the end of that renderpass
 				, VK_QUEUE_FAMILY_IGNORED
 				, VK_QUEUE_FAMILY_IGNORED
 				, swapchainImage
 				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
-
-		//renderCommandBuffer.end();
 	}
-
-	// Private render functions
-	void preRenderLoop(const ApplicationInfo& applicationInfo)
+	void imguiCommands()
 	{
-		loadVolumeData();
-		validateShaders(shaderMap);
-		initComputePipeline(applicationInfo);
-		submitTemporaryCommandBuffer(applicationInfo);;
-	}
-	void renderFrame(const ApplicationInfo& applicationInfo, uint32_t imageIndex)
-	{
-		APPLICATION_INFO_BINDINGS
-	
-		//const auto fenceResult = device.getFenceStatus(isRenderCommandBufferExecutedFence); // Only signaled in the first loop, we will use this to make proper layout transition when record the render command buffer
-	
-		//// Fence and submission
-		//std::ignore = device.waitForFences(isRenderCommandBufferExecutedFence, VK_TRUE, std::numeric_limits<uint64_t>::max()); // Avoid modifying the command buffer when it's in used by the device
-		//device.resetFences(isRenderCommandBufferExecutedFence);
-	
-		//const auto resultValue = device.acquireNextImageKHR(swapchain, std::numeric_limits<uint64_t>::max(), isAcquiredImageReadSemaphore); // Semaphore will be raised when the acquired image is finished reading by the engine
-		//if (resultValue.result != vk::Result::eSuccess) throw std::runtime_error{"Failed to acquire the next image index."};
-	
-		//const auto imageIndex = resultValue.value;
-		//const auto waitStages = std::vector<vk::PipelineStageFlags>{vk::PipelineStageFlagBits::eComputeShader}; // Wait the compute shader if we have inflight command buffers
-		//recordRenderCommandBuffer(applicationInfo, imageIndex, fenceResult);
+		//ImGui::ShowDemoWindow();
 
-		//queue.submit(vk::SubmitInfo{
-		//	isAcquiredImageReadSemaphore // Wait for the image to be finished reading, then we will modify it via the commands in the commandBuffers
-		//	, waitStages 
-		//	, renderCommandBuffers
-		//	, isImageRenderedSemaphore // Raise when finished executing the commands
-		//}, isRenderCommandBufferExecutedFence); // Raise when finished executing the commands
-	
-		//const auto presentResult = queue.presentKHR(vk::PresentInfoKHR{
-		//	isImageRenderedSemaphore
-		//	, swapchain
-		//	, imageIndex
-		//});
-		//if (presentResult != vk::Result::eSuccess) throw std::runtime_error{"Failed to present image."};
+		//For each imgui window ,7643
+		ImGui::Begin("Transfer function editor"); // Create a window
+		//ImGui::PlotHistogram("Intensity histogram", histogram.data(), histogram.size(), 0, nullptr, 0.0, 1.0, ImVec2{0, 80.0}); // Scale min/max represent the lowest/highest values of the data histogram
+
+		// 349
+		//const auto drawData = ImGui::GetDrawData();
+		//drawData->Valid();
+		//drawData->CmdLists();
+
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));      // Disable padding
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(50, 50, 50, 255));  // Set a background color
+		ImGui::BeginChild("canvas", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_NoMove);
+		ImGui::PopStyleColor();
+		ImGui::PopStyleVar();
+		ImGui::EndChild();
+
+		ImGui::End();
+
 	}
+
 	void postRenderLoop(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
@@ -481,9 +447,9 @@ int main()
 	const auto runInfo = RunInfo{
 		{}
 		, {}
-		, vk::ImageUsageFlagBits::eTransferDst
 		, preRenderLoop
-		, recordRenderCommandBuffer //renderFrame
+		, recordRenderingCommands
+		, imguiCommands
 		, postRenderLoop
 		, "Volume Rendering"
 	};
