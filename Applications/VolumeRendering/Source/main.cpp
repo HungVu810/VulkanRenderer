@@ -13,7 +13,6 @@
 
 #define APPLICATION_INFO_BINDINGS const auto& [window, instance, surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, commandBuffer] = applicationInfo;
 
-// TODO: imgui, imguizmo in VulkanApplication.cpp
 // constexpr, consteval
 // create a appThread class that takes works and assigned with enum of the current work
 // TODO: seperate this vuklan application into a framework to support different
@@ -23,21 +22,24 @@
 
 namespace 
 {
-	// TODO: use this
-	constexpr auto USE_IMGUI = true;
-	constexpr auto HISTOGRAM_SAMPLE_COUNT = 2000; // For displaying volume data via imgui as a representation
-
 	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
+
+	// TODO: use this, imgui is disabled by default
+	// ImGui
+	constexpr auto USE_IMGUI = true;
+	auto histogram = std::vector<float>(200); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
+	auto alphaControlPoints = std::vector<ImVec2>{}; // Clicked control points, the position is with respect to the histogram widget cursor
+	auto isImguiInit = false;
+
+	// Application
 	constexpr auto NUM_SLIDES = 113; // Ratio is 1:1:2, 2 unit of depth
 	constexpr auto SLIDE_HEIGHT = 256;
 	constexpr auto SLIDE_WIDTH = 256;
 	constexpr auto NUM_INTENSITIES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
 	constexpr auto TOTAL_SCAN_BYTES = NUM_INTENSITIES * sizeof(Intensity);
-
 	// z-y-x order, contains all intensity values of each slide images. Tightly packed
 	// vector instead of array bececause NUM_INTENSITIES is large, occupy the heap instead
 	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // The actual data used for sampling
-	auto histogram = std::vector<Intensity>{}; // For imgui
 	auto shaderMap = std::unordered_map<std::string, Shader>{};
 	vk::Image raycastedImage; vk::DeviceMemory raycastedImageMemory;
 	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory;
@@ -79,12 +81,19 @@ namespace
 	}
 	void prepareHistogramVolumeData()
 	{
-		const auto width = intensities.data.size() / HISTOGRAM_SAMPLE_COUNT; // Rounded down implicitly, target samples >= HISTOGRAM_SAMPLE_COUNT
-		assertm(width > 0 && width <= intensities.data.size(), "Invalid HISTOGRAM_SAMPLE_COUNT");
-		histogram = intensities.data
-			| std::views::chunk(width)
-			| std::views::transform([](const auto& chunk){return std::accumulate(chunk.begin(), chunk.end(), static_cast<Intensity>(0)) / chunk.size();}) // Average the accumulated value of the current chunk
-			| std::ranges::to<std::vector<Intensity>>();
+		auto sortedContainer = intensities.data;
+		auto countMax = size_t{0};
+		const auto stepSize = 1.0f / histogram.size();
+		std::ranges::sort(sortedContainer, [](Intensity a, Intensity b){return a < b;}); // Ascending order
+		for (int i = 0; i < histogram.size(); i++)
+		{
+			const auto iterLower = std::ranges::lower_bound(sortedContainer, stepSize * i); // Inclusiveness
+			const auto iterUpper = std::ranges::upper_bound(sortedContainer, stepSize * (i + 0.9)); // 0.9 for Exclusiveness
+			const auto count = static_cast<float>(std::distance(iterLower, iterUpper)); // Count the values within the bound
+			histogram[i] = count;
+			if (count > countMax) countMax = count;
+		}
+		for (auto& count : histogram) count /= countMax; // Normalize the count so we use it for scaling later on
 	}
 	void initComputePipeline(const ApplicationInfo& applicationInfo)
 	{
@@ -326,9 +335,8 @@ namespace
 			}
 		});
 	}
-
 	// TODO: Create a struct RenderFrame in RunInfo that accept a recording function and an optional imgui commands function, will be check against the USE_IMGUI var
-	// Remove isFirstFrame
+	// Remove isFirstFrame, this can be done in the preRenderLoop funcitno
 	void recordRenderingCommands(const ApplicationInfo& applicationInfo, uint32_t imageIndex, bool isFirstFrame)
 	{
 		APPLICATION_INFO_BINDINGS
@@ -400,28 +408,122 @@ namespace
 				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 	}
+	// TODO: port utilities function from os project over
 	void imguiCommands()
 	{
 		//ImGui::ShowDemoWindow();
-
-		//For each imgui window ,7643
-		ImGui::Begin("Transfer function editor"); // Create a window
 		//ImGui::PlotHistogram("Intensity histogram", histogram.data(), histogram.size(), 0, nullptr, 0.0, 1.0, ImVec2{0, 80.0}); // Scale min/max represent the lowest/highest values of the data histogram
+		//const auto& io = ImGui::GetIO();
 
-		// 349
-		//const auto drawData = ImGui::GetDrawData();
-		//drawData->Valid();
-		//drawData->CmdLists();
+		ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize); // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
+		// Window default settings	
+		if (!isImguiInit)
+		{
+			ImGui::SetWindowPos(ImVec2{0, 0});
+			ImGui::SetWindowSize(ImVec2{500, 500});
+		}
 
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));      // Disable padding
-		ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(50, 50, 50, 255));  // Set a background color
-		ImGui::BeginChild("canvas", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_NoMove);
-		ImGui::PopStyleColor();
-		ImGui::PopStyleVar();
-		ImGui::EndChild();
+		{
+			// Data
+			const auto drawList = ImGui::GetWindowDrawList();
+			const auto colorSpectrumHeightPercentage = 1.0f / 12.0f; // With respect to the transfer function window size
+			const auto colorSpectrumChildExtent = ImVec2{
+				ImGui::GetContentRegionAvail().x
+				, ImGui::GetContentRegionAvail().y * colorSpectrumHeightPercentage - ImGui::GetStyle().FramePadding.y / 2 // -1. Optionally subtract 1 to avoid scrolling appear when resizing the imgui window due to the widgets size perfectly matched the content region
+			};
+			const auto histogramAlphaHeightPercentage = 1.0f - colorSpectrumHeightPercentage;
+			const auto histogramAlphaChildExtent = ImVec2{
+				ImGui::GetContentRegionAvail().x
+				, ImGui::GetContentRegionAvail().y * histogramAlphaHeightPercentage - ImGui::GetStyle().FramePadding.y / 2 // Frame padding divided by 2 because we have 2 widget
+			};
+			// Two default control points
+			if (!isImguiInit)
+			{
+				alphaControlPoints.push_back(unnormalizeCoordinate(ImVec2{0.0f, 0.5f}, histogramAlphaChildExtent));
+				alphaControlPoints.push_back(unnormalizeCoordinate(ImVec2{1.0f, 0.5f}, histogramAlphaChildExtent));
+			}
+
+			// Transfer function canvas for alpha control points and histogram
+			{
+				ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0}); // Needed to avoid padding between the widget and the invisible button, tested with a visible button
+				ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(50, 50, 50, 255));
+				ImGui::BeginChild("Histogram Alpha", histogramAlphaChildExtent, true, ImGuiWindowFlags_NoMove);
+				const auto childCursorPosition = ImGui::GetCursorScreenPos(); // Must be placed above the visible button because we want the cursor of the current widget, not the button
+
+				// Mouse position capture area, push back any captured position (control point) for drawinng
+				// TODO: Moving the control points around with left mouse when click on empty area, check if drawn circle can be dectedted with imgui function
+				// TODO: HSV color wheel when click with right mouse
+				ImGui::InvisibleButton("Input position capture", ImVec2{
+					ImGui::GetContentRegionAvail().x
+					, ImGui::GetContentRegionAvail().y}, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight); 
+				if (ImGui::IsItemClicked()) // Hovering the invisible button within the widget
+				{
+					const auto clickedPositionGLFW = ImGui::GetMousePos(); // With respect to the glfw Window
+					const auto clickedPositionInChild = subtract(clickedPositionGLFW, childCursorPosition);
+					alphaControlPoints.push_back(clickedPositionInChild);
+					std::ranges::sort(alphaControlPoints, [](const ImVec2& a, const ImVec2& b){return a.x < b.x;}); // Only sort the control points in an ascending order based on the x position
+				}
+
+				// Drawing area within the current child windoww
+				drawList->PushClipRect(childCursorPosition, add(childCursorPosition, histogramAlphaChildExtent));
+
+				// Draw histogram
+				const auto stepSize = 1.0f / histogram.size();
+				for (int i = 0; i < histogram.size(); i++)
+				{
+					const auto upperLeftExtentX = i * stepSize * histogramAlphaChildExtent.x;
+					const auto upperLeftExtentY = histogramAlphaChildExtent.y * (1.0f - histogram[i]); // count == histogram[i] is normalized, we can use it to scale the extent.y. We do (1.0f - count) to force the scale 0.0 and 1.0 to be further/closert to the child top left origin
+
+					const auto lowerRightExtentX = (i + 1) * stepSize * histogramAlphaChildExtent.x;
+					const auto lowerRightExtentY = histogramAlphaChildExtent.y;
+
+					const auto upperLeft = add(childCursorPosition, ImVec2{upperLeftExtentX, upperLeftExtentY});
+					const auto lowerRight = add(childCursorPosition, ImVec2{lowerRightExtentX, lowerRightExtentY});
+					drawList->AddRectFilled(upperLeft, lowerRight, ImColor{0.5f, 0.5f, 0.5f});
+				}
+
+				// Draw any control points and connect them via lines
+				auto offsetedAlphaControlPoints = alphaControlPoints | std::views::transform([&](const ImVec2& alphaControlPoints){return add(childCursorPosition, alphaControlPoints);}); // The alpha control points are with respect to the child cursor, we need to offset it with the cursor position
+				for (int i = 0; i < offsetedAlphaControlPoints.size(); i++)
+				{
+					drawList->AddCircleFilled(offsetedAlphaControlPoints[i], 5, ImColor{1.0f, 1.0f, 1.0f}, 0);
+					if (i == 0) continue;
+					drawList->AddLine(offsetedAlphaControlPoints[i - 1], offsetedAlphaControlPoints[i], ImColor{1.0f, 1.0f, 1.0f});
+				}
+				drawList->PopClipRect();
+
+				ImGui::EndChild();
+				ImGui::PopStyleColor();
+				ImGui::PopStyleVar();
+			}
+
+			// Transfer function color spectrum, another child window
+			{
+				// TODO: seet widget color with the 2d color spectrum from the control points
+				ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(50, 50, 50, 255));  // Set a background color
+				ImGui::BeginChild("Color spectrum", colorSpectrumChildExtent, true, ImGuiWindowFlags_NoMove); ImGui::PopStyleColor();
+				ImGui::EndChild();
+			}
+		}
 
 		ImGui::End();
 
+		// Add 2 default control points at the min and max, the user can drag these 2 points but the x axis is fixed, only the y can be manipulated
+
+		// Added control point will have the color black by default, click on
+		// the cnotrol point ->  HSV color picker or enter color value rgb no A
+		// -> interpolate the color of the control points then visualize it on
+		// the color stripe on top of the canvas
+
+		//ImGui::PushID(i);
+		//ImGui::PushStyleColor(ImGuiCol_Button, (ImVec4)ImColor::HSV(i / 7.0f, 0.6f, 0.6f));
+		//ImGui::PushStyleColor(ImGuiCol_ButtonHovered, (ImVec4)ImColor::HSV(i / 7.0f, 0.7f, 0.7f));
+		//ImGui::PushStyleColor(ImGuiCol_ButtonActive, (ImVec4)ImColor::HSV(i / 7.0f, 0.8f, 0.8f));
+		//ImGui::Button("Click");
+		//ImGui::PopStyleColor(3);
+		//ImGui::PopID();
+
+		isImguiInit = true;
 	}
 
 	void postRenderLoop(const ApplicationInfo& applicationInfo)

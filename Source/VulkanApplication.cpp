@@ -394,6 +394,8 @@ void VulkanApplication::initImGui()
 {
 	// C:\dev\vcpkg\buildtrees\imgui\src
 	// https://github.com/ocornut/imgui/wiki
+	// https://github.com/epezent/implot
+	// imguizmo 
 	// Imgui is layered onto top of our window, see imgui_demo.cpp, example_glfw_vulkan.cpp, and imgui_impl_vulkan.cpp
 	// All the ImGui_ImplVulkanH_XXX structures/functions are optional helpers used by the demo
 

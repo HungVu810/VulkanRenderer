@@ -3,6 +3,7 @@
 #include "glm/vec2.hpp"
 #include "glm/vec3.hpp"
 #include "glm/vec4.hpp"
+#include "imgui.h"
 #include <filesystem>
 #include <ranges>
 #include <algorithm>
@@ -92,7 +93,7 @@ inline constexpr void assertm(bool condition, std::string_view message)
 {
 	return std::views::zip(std::views::iota(0U, container.size()), container);
 }
-template<typename AccumulatedType = int> // The type of the values produced from the accumulated chunks
+template<typename AccumulatedType> // The type of the values produced from the accumulated chunks
 [[nodiscard]] inline auto accumulateChunks(const auto& container, int width = 1) // {0, 1, 2, 3, 4, 5} -> {6, 9} with width = 4, ie 2 accumulated chunks {0, 1, 2, 3} and {4, 5}
 {
 	assert(width > 0 && width <= container.size());
@@ -101,6 +102,38 @@ template<typename AccumulatedType = int> // The type of the values produced from
 		| std::views::transform([](const auto& chunk){return std::accumulate(chunk.begin(), chunk.end(), static_cast<AccumulatedType>(0)); }) // Cast 0 to double instead of the 0 (int) to prevent the accumulate from casting the value to int
 		| std::ranges::to<std::vector>();
 }
+template<typename ComparedType>
+[[nodiscard]] inline auto sortAndRemoveDuplicates(const auto& container)
+{
+	// https://en.cppreference.com/w/cpp/algorithm/ranges/unique
+	// Sorting first (ascending order) will allow 100% removal of the duplicates
+	auto targetContainer = container;
+	std::ranges::sort(targetContainer, [](ComparedType a, ComparedType b){return a < b;});
+	const auto erasableRange = std::ranges::unique(targetContainer);
+	targetContainer.erase(erasableRange.begin(), erasableRange.end()); // Will remove the excessive indeterminates at the end
+	return targetContainer;
+}
+
+// ImGui
+[[nodiscard]] inline auto add(const ImVec2& a, const ImVec2& b)
+{
+	return ImVec2{a.x + b.x, a.y + b.y};
+}
+[[nodiscard]] inline auto subtract(const ImVec2& a, const ImVec2& b)
+{
+	return ImVec2{a.x - b.x, a.y - b.y};
+}
+[[nodiscard]] inline auto scale(const ImVec2& a, const float k)
+{
+	return ImVec2{a.x * k, a.y * k};
+}
+[[nodiscard]] inline auto unnormalizeCoordinate(const ImVec2& coordinate, const ImVec2& extent)
+{
+	assertm(0 <= coordinate.x && coordinate.x <= 1
+		 && 0 <= coordinate.y && coordinate.y <= 1
+		 && 0 < extent.x && 0 < extent.y, "Invalid coordinate/extent");
+	return ImVec2{coordinate.x * extent.x, coordinate.y * extent.y};
+};
 /* Inline/Lambda helpers ======================================== */
 
 /* Normal helpers =============================================== */
