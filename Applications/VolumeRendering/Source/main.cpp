@@ -28,7 +28,12 @@ namespace
 	// ImGui
 	constexpr auto USE_IMGUI = true;
 	auto histogram = std::vector<float>(200); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
-	auto alphaControlPoints = std::vector<ImVec2>{}; // Clicked control points, the position is with respect to the histogram widget cursor
+	struct ControlPoint
+	{
+		ImVec2 position; // With respect to the histogram child window cursor
+		ImColor color; // Picked from the HSV color wheel
+	};
+	auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is 
 	auto isImguiInit = false;
 
 	// Application
@@ -415,6 +420,12 @@ namespace
 		//ImGui::PlotHistogram("Intensity histogram", histogram.data(), histogram.size(), 0, nullptr, 0.0, 1.0, ImVec2{0, 80.0}); // Scale min/max represent the lowest/highest values of the data histogram
 		//const auto& io = ImGui::GetIO();
 
+		// Add 2 default control points at the min and max, the user can drag these 2 points but the x axis is fixed, only the y can be manipulated
+		// Added control point will have the color black by default, click on
+		// the cnotrol point ->  HSV color picker or enter color value rgb no A
+		// -> interpolate the color of the control points then visualize it on
+		// the color stripe on top of the canvas
+
 		ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize); // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
 		// Window default settings	
 		if (!isImguiInit)
@@ -422,6 +433,13 @@ namespace
 			ImGui::SetWindowPos(ImVec2{0, 0});
 			ImGui::SetWindowSize(ImVec2{500, 500});
 		}
+
+		// ------------- color wheel picker
+		// Test with the 2 default control points with defined colors, then show the color  in the chilr window
+		// TODO: Moving the control points around with left mouse when click on empty area, check if drawn circle can be dectedted with imgui function
+		// Add/delete control points, when click on a contol point, a popup shown and prompt (change color or delete)
+		// TODO: HSV color wheel when click with right mouse
+		// TODO: seet widget color with the 2d color spectrum from the control points
 
 		{
 			// Data
@@ -436,36 +454,67 @@ namespace
 				ImGui::GetContentRegionAvail().x
 				, ImGui::GetContentRegionAvail().y * histogramAlphaHeightPercentage - ImGui::GetStyle().FramePadding.y / 2 // Frame padding divided by 2 because we have 2 widget
 			};
-			// Two default control points
+			const auto defaultControlPointColor = ImColor{1.0f, 0.0f, 0.0f};
+			const auto getAlpha = [](const ImVec2& controlPointPosition, const ImVec2& childWindowExtent) // The controlPointPosition is with respect to the child window cursor
+			{
+				return 1.0f - (controlPointPosition.y / childWindowExtent.y); // Control point's y = 0 (hit the child window's ceilling) means max opacity = 1
+			};
+
+			// Two default control points that aren't using the default control point color
 			if (!isImguiInit)
 			{
-				alphaControlPoints.push_back(unnormalizeCoordinate(ImVec2{0.0f, 0.5f}, histogramAlphaChildExtent));
-				alphaControlPoints.push_back(unnormalizeCoordinate(ImVec2{1.0f, 0.5f}, histogramAlphaChildExtent));
+				const auto leftMostControlPoint = unnormalizeCoordinate(ImVec2{0.0f, 0.5f}, histogramAlphaChildExtent);
+				controlPoints.push_back(ControlPoint{
+					leftMostControlPoint
+					, ImColor{
+						1.0f
+						, 0.0f
+						, 0.0f
+						, getAlpha(leftMostControlPoint, histogramAlphaChildExtent)
+					}
+				});
+				const auto rightMostControlPoint = unnormalizeCoordinate(ImVec2{1.0f, 0.5f}, histogramAlphaChildExtent);
+				controlPoints.push_back(ControlPoint{
+					rightMostControlPoint
+					, ImColor{
+						0.0f
+						, 1.0f
+						, 0.0f
+						, getAlpha(rightMostControlPoint, histogramAlphaChildExtent)
+					}
+				});
 			}
 
 			// Transfer function canvas for alpha control points and histogram
 			{
-				ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0}); // Needed to avoid padding between the widget and the invisible button, tested with a visible button
+				ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0}); // Needed to avoid padding between the child window and the invisible button/the clip rect, tested with a visible button
 				ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(50, 50, 50, 255));
 				ImGui::BeginChild("Histogram Alpha", histogramAlphaChildExtent, true, ImGuiWindowFlags_NoMove);
-				const auto childCursorPosition = ImGui::GetCursorScreenPos(); // Must be placed above the visible button because we want the cursor of the current widget, not the button
+				const auto childWindowCursor = ImGui::GetCursorScreenPos(); // Must be placed above the visible button because we want the cursor of the current child window, not the button
 
 				// Mouse position capture area, push back any captured position (control point) for drawinng
-				// TODO: Moving the control points around with left mouse when click on empty area, check if drawn circle can be dectedted with imgui function
-				// TODO: HSV color wheel when click with right mouse
-				ImGui::InvisibleButton("Input position capture", ImVec2{
-					ImGui::GetContentRegionAvail().x
-					, ImGui::GetContentRegionAvail().y}, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight); 
+				ImGui::InvisibleButton("Input position capture", ImGui::GetContentRegionAvail(), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight); 
 				if (ImGui::IsItemClicked()) // Hovering the invisible button within the widget
 				{
 					const auto clickedPositionGLFW = ImGui::GetMousePos(); // With respect to the glfw Window
-					const auto clickedPositionInChild = subtract(clickedPositionGLFW, childCursorPosition);
-					alphaControlPoints.push_back(clickedPositionInChild);
-					std::ranges::sort(alphaControlPoints, [](const ImVec2& a, const ImVec2& b){return a.x < b.x;}); // Only sort the control points in an ascending order based on the x position
+					const auto clickedPositionInChild = subtract(clickedPositionGLFW, childWindowCursor);
+					controlPoints.push_back(ControlPoint{
+						clickedPositionInChild
+						, ImColor{
+							defaultControlPointColor.Value.x
+							, defaultControlPointColor.Value.y
+							, defaultControlPointColor.Value.z
+							, getAlpha(clickedPositionInChild, histogramAlphaChildExtent)
+						}
+					});
+					std::ranges::sort(controlPoints
+						, [](const ImVec2& a, const ImVec2& b){return a.x < b.x; }
+						, [](const ControlPoint& controlPoint){return controlPoint.position;}
+					); // Only sort the control points in an ascending order based on the x position
 				}
 
 				// Drawing area within the current child windoww
-				drawList->PushClipRect(childCursorPosition, add(childCursorPosition, histogramAlphaChildExtent));
+				drawList->PushClipRect(childWindowCursor, add(childWindowCursor, histogramAlphaChildExtent));
 
 				// Draw histogram
 				const auto stepSize = 1.0f / histogram.size();
@@ -477,18 +526,19 @@ namespace
 					const auto lowerRightExtentX = (i + 1) * stepSize * histogramAlphaChildExtent.x;
 					const auto lowerRightExtentY = histogramAlphaChildExtent.y;
 
-					const auto upperLeft = add(childCursorPosition, ImVec2{upperLeftExtentX, upperLeftExtentY});
-					const auto lowerRight = add(childCursorPosition, ImVec2{lowerRightExtentX, lowerRightExtentY});
+					const auto upperLeft = add(childWindowCursor, ImVec2{upperLeftExtentX, upperLeftExtentY});
+					const auto lowerRight = add(childWindowCursor, ImVec2{lowerRightExtentX, lowerRightExtentY});
 					drawList->AddRectFilled(upperLeft, lowerRight, ImColor{0.5f, 0.5f, 0.5f});
 				}
 
 				// Draw any control points and connect them via lines
-				auto offsetedAlphaControlPoints = alphaControlPoints | std::views::transform([&](const ImVec2& alphaControlPoints){return add(childCursorPosition, alphaControlPoints);}); // The alpha control points are with respect to the child cursor, we need to offset it with the cursor position
-				for (int i = 0; i < offsetedAlphaControlPoints.size(); i++)
+				// Offset the control point to be with respect to the ImGui cursor instead of a child cursor
+				auto offsetedControlPointPositions = controlPoints | std::views::transform([&](const ControlPoint& controlPoint){return add(childWindowCursor, controlPoint.position);}); // The alpha control points are with respect to the child cursor, we need to offset it with the cursor position
+				for (int i = 0; i < offsetedControlPointPositions.size(); i++)
 				{
-					drawList->AddCircleFilled(offsetedAlphaControlPoints[i], 5, ImColor{1.0f, 1.0f, 1.0f}, 0);
+					drawList->AddCircleFilled(offsetedControlPointPositions[i], 5, ImColor{1.0f, 1.0f, 1.0f}, 0);
 					if (i == 0) continue;
-					drawList->AddLine(offsetedAlphaControlPoints[i - 1], offsetedAlphaControlPoints[i], ImColor{1.0f, 1.0f, 1.0f});
+					drawList->AddLine(offsetedControlPointPositions[i - 1], offsetedControlPointPositions[i], ImColor{1.0f, 1.0f, 1.0f});
 				}
 				drawList->PopClipRect();
 
@@ -499,29 +549,42 @@ namespace
 
 			// Transfer function color spectrum, another child window
 			{
-				// TODO: seet widget color with the 2d color spectrum from the control points
+				ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0}); // Needed to avoid padding between the child window and the clip rect, tested with a visible button
 				ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(50, 50, 50, 255));  // Set a background color
-				ImGui::BeginChild("Color spectrum", colorSpectrumChildExtent, true, ImGuiWindowFlags_NoMove); ImGui::PopStyleColor();
+				ImGui::BeginChild("Color spectrum", colorSpectrumChildExtent, true, ImGuiWindowFlags_NoMove);
+				const auto childWindowCursor = ImGui::GetCursorScreenPos();
+
+				// Draw each of the color spectrum rectangles per 2 control points
+				drawList->PushClipRect(childWindowCursor, add(childWindowCursor, colorSpectrumChildExtent));
+
+				for (size_t i = 1; i < controlPoints.size(); i++)
+				{
+					const auto upperLeftPosition = ImVec2{childWindowCursor.x + controlPoints[i - 1].position.x, childWindowCursor.y};
+					const auto leftColor = controlPoints[i - 1].color; // Including alpha
+
+					const auto lowerRightPosition = ImVec2{childWindowCursor.x + controlPoints[i].position.x, childWindowCursor.y + colorSpectrumChildExtent.y}; // Adding y of the child extent to reach to the floor of the current child window
+					const auto rightColor = controlPoints[i].color;  // Including alpha
+
+					drawList->AddRectFilledMultiColor(
+						upperLeftPosition
+						, lowerRightPosition
+						, leftColor // Upper left
+						, rightColor // Upper right
+						, rightColor // Lower right
+						, leftColor // Lower left
+					);
+				}
+
+
+				drawList->PopClipRect();
+
 				ImGui::EndChild();
+				ImGui::PopStyleColor();
+				ImGui::PopStyleVar();
 			}
 		}
 
 		ImGui::End();
-
-		// Add 2 default control points at the min and max, the user can drag these 2 points but the x axis is fixed, only the y can be manipulated
-
-		// Added control point will have the color black by default, click on
-		// the cnotrol point ->  HSV color picker or enter color value rgb no A
-		// -> interpolate the color of the control points then visualize it on
-		// the color stripe on top of the canvas
-
-		//ImGui::PushID(i);
-		//ImGui::PushStyleColor(ImGuiCol_Button, (ImVec4)ImColor::HSV(i / 7.0f, 0.6f, 0.6f));
-		//ImGui::PushStyleColor(ImGuiCol_ButtonHovered, (ImVec4)ImColor::HSV(i / 7.0f, 0.7f, 0.7f));
-		//ImGui::PushStyleColor(ImGuiCol_ButtonActive, (ImVec4)ImColor::HSV(i / 7.0f, 0.8f, 0.8f));
-		//ImGui::Button("Click");
-		//ImGui::PopStyleColor(3);
-		//ImGui::PopID();
 
 		isImguiInit = true;
 	}
