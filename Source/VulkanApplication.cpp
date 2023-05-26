@@ -93,7 +93,7 @@ namespace
 		if (discretePhysicalDeviceIter == suitablePhysicalDevices.end())
 		{
 			std::cout << tag::warning << "Using a non-discrete device for rendering.\n";
-			return suitablePhysicalDevices.front();
+			return suitablePhysicalDevices.front(); // Just using a random integrated device
 		}
 		else return *discretePhysicalDeviceIter;
 	}

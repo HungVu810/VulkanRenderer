@@ -127,11 +127,15 @@ template<typename ComparedType>
 {
 	return ImVec2{a.x * k, a.y * k};
 }
+[[nodiscard]] inline auto length(const ImVec2& a)
+{
+	return std::sqrt(a.x * a.x + a.y * a.y);
+}
 [[nodiscard]] inline auto unnormalizeCoordinate(const ImVec2& coordinate, const ImVec2& extent)
 {
 	assertm(0 <= coordinate.x && coordinate.x <= 1
-		 && 0 <= coordinate.y && coordinate.y <= 1
-		 && 0 < extent.x && 0 < extent.y, "Invalid coordinate/extent");
+		 && 0 <= coordinate.y && coordinate.y <= 1, "Invalid coordinate");
+		 //&& 0 < extent.x && 0 < extent.y, "Invalid coordinate/extent");
 	return ImVec2{coordinate.x * extent.x, coordinate.y * extent.y};
 };
 /* Inline/Lambda helpers ======================================== */

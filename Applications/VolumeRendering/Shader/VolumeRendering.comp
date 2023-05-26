@@ -6,6 +6,8 @@ layout(set = 0, binding = 0) uniform sampler3D volumnSampler; // Stores 3D inten
 
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D raycastedImage;
 
+// layout() dynamic sampler1D transferFunciton; // a texture 256 pixels,
+
 struct ViewPyramid
 {
 	vec3 location; // Top of the pyramid (camera, the apex)

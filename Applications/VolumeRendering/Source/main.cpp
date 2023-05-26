@@ -420,13 +420,16 @@ namespace
 		//ImGui::PlotHistogram("Intensity histogram", histogram.data(), histogram.size(), 0, nullptr, 0.0, 1.0, ImVec2{0, 80.0}); // Scale min/max represent the lowest/highest values of the data histogram
 		//const auto& io = ImGui::GetIO();
 
+		// Static, any variable with perserved state
+		static auto hitIndex = std::optional<size_t>{std::nullopt}; // Hold the index of the current hit control point if one exist
+
 		// Add 2 default control points at the min and max, the user can drag these 2 points but the x axis is fixed, only the y can be manipulated
 		// Added control point will have the color black by default, click on
 		// the cnotrol point ->  HSV color picker or enter color value rgb no A
 		// -> interpolate the color of the control points then visualize it on
 		// the color stripe on top of the canvas
 
-		ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize); // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
+		ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove); // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
 		// Window default settings	
 		if (!isImguiInit)
 		{
@@ -440,6 +443,7 @@ namespace
 		// Add/delete control points, when click on a contol point, a popup shown and prompt (change color or delete)
 		// TODO: HSV color wheel when click with right mouse
 		// TODO: seet widget color with the 2d color spectrum from the control points
+		// TODO: show a popup that have 3 options (move, change color, delete) when right click on a control point
 
 		{
 			// Data
@@ -454,10 +458,24 @@ namespace
 				ImGui::GetContentRegionAvail().x
 				, ImGui::GetContentRegionAvail().y * histogramAlphaHeightPercentage - ImGui::GetStyle().FramePadding.y / 2 // Frame padding divided by 2 because we have 2 widget
 			};
-			const auto defaultControlPointColor = ImColor{1.0f, 0.0f, 0.0f};
+			const auto defaultControlPointColor = ImColor{1.0f, 1.0f, 1.0f};
+			const auto controlPointRadius = 5.0f;
+
+			// Helpers
 			const auto getAlpha = [](const ImVec2& controlPointPosition, const ImVec2& childWindowExtent) // The controlPointPosition is with respect to the child window cursor
 			{
 				return 1.0f - (controlPointPosition.y / childWindowExtent.y); // Control point's y = 0 (hit the child window's ceilling) means max opacity = 1
+			};
+			const auto getHitControlPointIndex = [&](const ImVec2& cursor, const float tolerance = 0.1f) -> std::optional<size_t> // Return an optional index to a hit control point. Cursor is the cursor of the window in which the user clicks
+			{
+				const auto cursorPosition = ImGui::GetMousePos();
+				const auto isHit = [&](const ControlPoint& controlPoint)
+				{
+					return length(subtract(add(cursor, controlPoint.position), cursorPosition)) <= controlPointRadius + tolerance; // Add the cursor and the control point position to get to the screent space position instead of the control point being relative to the cursor
+				};
+				const auto iterControlPoint = std::ranges::find_if(controlPoints, isHit);
+				if (iterControlPoint == controlPoints.end()) return std::nullopt;
+				else return std::distance(controlPoints.begin(), iterControlPoint);
 			};
 
 			// Two default control points that aren't using the default control point color
@@ -489,13 +507,19 @@ namespace
 			{
 				ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0}); // Needed to avoid padding between the child window and the invisible button/the clip rect, tested with a visible button
 				ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(50, 50, 50, 255));
-				ImGui::BeginChild("Histogram Alpha", histogramAlphaChildExtent, true, ImGuiWindowFlags_NoMove);
+				ImGui::BeginChild("Histogram Alpha", histogramAlphaChildExtent, true);
 				const auto childWindowCursor = ImGui::GetCursorScreenPos(); // Must be placed above the visible button because we want the cursor of the current child window, not the button
 
 				// Mouse position capture area, push back any captured position (control point) for drawinng
-				ImGui::InvisibleButton("Input position capture", ImGui::GetContentRegionAvail(), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight); 
-				if (ImGui::IsItemClicked()) // Hovering the invisible button within the widget
+				ImGui::InvisibleButton("Input position capture", histogramAlphaChildExtent, ImGuiMouseButton_Left | ImGuiMouseButton_Right);
+				if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) // Add new control point
 				{
+					//const auto controlPointIndex = getHitControlPointIndex(childWindowCursor, 5.0f);
+					//if (controlPointIndex != std::nullopt)
+					//{
+					//	Allow moving of this control point, update the control points via sorting on the fly
+					//}
+					//else do the bellow
 					const auto clickedPositionGLFW = ImGui::GetMousePos(); // With respect to the glfw Window
 					const auto clickedPositionInChild = subtract(clickedPositionGLFW, childWindowCursor);
 					controlPoints.push_back(ControlPoint{
@@ -507,10 +531,36 @@ namespace
 							, getAlpha(clickedPositionInChild, histogramAlphaChildExtent)
 						}
 					});
-					std::ranges::sort(controlPoints
-						, [](const ImVec2& a, const ImVec2& b){return a.x < b.x; }
+					std::ranges::sort(
+						controlPoints
+						, [](const ImVec2& a, const ImVec2& b){return a.x < b.x;}
 						, [](const ControlPoint& controlPoint){return controlPoint.position;}
 					); // Only sort the control points in an ascending order based on the x position
+				}
+				else if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) // If this is false then the popup won't be drawn, we need to seperate openpopup  and beginpopup instaed of placing both in this conditional statement
+				{
+					hitIndex = getHitControlPointIndex(childWindowCursor, 5.0f);
+					if (hitIndex != std::nullopt)
+					{
+						ImGui::OpenPopup("Input position capture");
+					}
+				}
+
+				// Popups, need to be close to the outer loop to be invoked continously to keep the popups stay opened
+				if (ImGui::BeginPopup("Input position capture", ImGuiWindowFlags_NoMove)) // The menu items are drawn above the push clip rect, we don't need to deferred it later than tthe clip rect drawing stage
+				{
+					//if (ImGui::MenuItem("Change color", nullptr))
+					//{
+					//	ImGui::OpenPopup("Change color");
+					//}
+
+					// Casting the address of the color of the current hit control point to float[3]. Since ImColor is the same as float[4], it is valid to do this.
+					if (ImGui::ColorPicker3("###", (float*)&(controlPoints[hitIndex.value()].color), ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha))
+					{
+
+					}
+					ImGui::MenuItem("Delete"); // Can't delete the first and the final control points
+					ImGui::EndPopup();
 				}
 
 				// Drawing area within the current child windoww
@@ -531,15 +581,30 @@ namespace
 					drawList->AddRectFilled(upperLeft, lowerRight, ImColor{0.5f, 0.5f, 0.5f});
 				}
 
-				// Draw any control points and connect them via lines
-				// Offset the control point to be with respect to the ImGui cursor instead of a child cursor
-				auto offsetedControlPointPositions = controlPoints | std::views::transform([&](const ControlPoint& controlPoint){return add(childWindowCursor, controlPoint.position);}); // The alpha control points are with respect to the child cursor, we need to offset it with the cursor position
-				for (int i = 0; i < offsetedControlPointPositions.size(); i++)
+				// Draw any connection lines. Draw connection lines first then draw the control points to make the control points ontop of the lines
+				for (int i = 1; i < controlPoints.size(); i++)
 				{
-					drawList->AddCircleFilled(offsetedControlPointPositions[i], 5, ImColor{1.0f, 1.0f, 1.0f}, 0);
-					if (i == 0) continue;
-					drawList->AddLine(offsetedControlPointPositions[i - 1], offsetedControlPointPositions[i], ImColor{1.0f, 1.0f, 1.0f});
+					drawList->AddLine(
+						add(childWindowCursor, controlPoints[i - 1].position) // The control points are with respect to the child window cursor, we need to offset them to the ImGui screen position before using them
+						, add(childWindowCursor, controlPoints[i].position)
+						, ImColor{1.0f, 1.0f, 1.0f});
 				}
+
+				// Draw control points
+				for (int i = 0; i < controlPoints.size(); i++)
+				{
+					drawList->AddCircleFilled(
+						add(childWindowCursor, controlPoints[i].position)
+						, controlPointRadius
+						, ImColor{
+							controlPoints[i].color.Value.x
+							, controlPoints[i].color.Value.y
+							, controlPoints[i].color.Value.z
+							, 1.0f // We want to see the color, the alpha of this color is implied by the position of the control point in the window and the color spectrum
+						}
+						, 0);
+				}
+
 				drawList->PopClipRect();
 
 				ImGui::EndChild();
