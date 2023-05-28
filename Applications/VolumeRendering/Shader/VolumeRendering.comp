@@ -4,7 +4,10 @@ layout (local_size_x = 10, local_size_y = 10, local_size_z = 1) in; // At least 
 
 layout(set = 0, binding = 0) uniform sampler3D volumnSampler; // Stores 3D intensities, [0, 1] * color white, not alpha
 
+layout(set = 0, binding = 2) uniform sampler1D transferSampler;
+
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D raycastedImage;
+
 
 // layout() dynamic sampler1D transferFunciton; // a texture 256 pixels,
 
@@ -89,21 +92,22 @@ HitInfo intersect(Ray ray, vec3 volumeMin, vec3 volumeMax)
 // Transfer function from ImGUI
 // layout(set 0, binding = ...) uniform dynamic sampler4D volumnColor; f(intensity) = color
 // layout(set 0, binding = ...) uniform dynamic sampler2D volumnAlpha; f(intensity) = alpha
-vec3 toColor(float intensity)
+vec3 toColor(float intensity) // intensity = [0, 1]
 {
-	// intensity = [0, 1]
-	const float pi = acos(-1);
-	float red = clamp(sin(intensity * 2.0 * pi), 0.0, 1.0);
-	float green = clamp(sin((intensity - (1.0 / 4.0)) * 2.0 * pi), 0.0, 1.0);
-	float blue = clamp(sin((intensity  - (1.0 / 2.0)) * 2.0 * pi), 0.0, 1.0);
-	return vec3(red, green, blue);
+//	const float pi = acos(-1);
+//	float red = clamp(sin(intensity * 2.0 * pi), 0.0, 1.0);
+//	float green = clamp(sin((intensity - (1.0 / 4.0)) * 2.0 * pi), 0.0, 1.0);
+//	float blue = clamp(sin((intensity  - (1.0 / 2.0)) * 2.0 * pi), 0.0, 1.0);
+//	return vec3(red, green, blue);
+//
+	return texture(transferSampler, intensity).xyz;
 }
 
-float toAlpha(float intensity)
+float toAlpha(float intensity) // intensity = [0, 1]
 {
 	// return 1; // Uniform
-	// intensity = [0, 1]
-	return intensity;
+	// return intensity;
+	return texture(transferSampler, intensity).w;
 }
 
 ViewPyramid initViewPyramid()
@@ -232,6 +236,7 @@ void main()
 			}
 		}
 	}
+
 
 	imageStore(raycastedImage, pixelViewportLocation, vec4(pixelColor, 1.0));
 }

@@ -392,7 +392,6 @@ void VulkanApplication::initSyncObjects()
 
 void VulkanApplication::initImGui()
 {
-	// C:\dev\vcpkg\buildtrees\imgui\src
 	// https://github.com/ocornut/imgui/wiki
 	// https://github.com/epezent/implot
 	// imguizmo 
@@ -609,6 +608,7 @@ void VulkanApplication::renderLoop(const RenderFrameFunction& recordRenderingCom
 		commandBuffer.end();
 
 		// Imgui is likely to share resource with the applicationss' commandbuffers commands, sync this imguiCommandbuffer and the application render commandbuffer
+		// Render the application first then pass the image rendered via color attachment to the top of the imgui renderpass to render the imgui ui ontop of the image
 
 		imguiCommands();
 
@@ -619,12 +619,12 @@ void VulkanApplication::renderLoop(const RenderFrameFunction& recordRenderingCom
 		const auto imguiCommandBuffer = imguiCommandBuffers.front();
 		imguiCommandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 		imguiCommandBuffer.waitEvents(renderCommandBufferEvent, vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTopOfPipe, {}, {}, {});
-		const auto clearval = static_cast<vk::ClearValue>(color::black);
+		const auto clearValues = static_cast<vk::ClearValue>(color::black);
 		imguiCommandBuffer.beginRenderPass(vk::RenderPassBeginInfo{
 				imguiRenderPass
 				, imguiFramebuffers[imageIndex]
 				, vk::Rect2D{vk::Offset2D{0, 0}, vk::Extent2D{surfaceExtent.width, surfaceExtent.height}}
-				, clearval
+				, clearValues // Doesn't matter because the imguiRenderPass load rather than clear the attachment. This is specifies in the attachmentDescription
 			}, vk::SubpassContents::eInline);
 		ImGui_ImplVulkan_RenderDrawData(draw_data, imguiCommandBuffer); // Record imgui primitives into command buffer via imgui pipeline
 		imguiCommandBuffer.endRenderPass();

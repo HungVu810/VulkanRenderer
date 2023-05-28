@@ -20,7 +20,7 @@
 // * device.BindResourceMemory
 
 // Physical memory allocation for the logical buffer
-[[nodiscard]] auto allocateMemory(const vk::Device& device, const vk::PhysicalDevice& physicalDevice, const vk::MemoryRequirements& memoryRequirements, bool shouldHostAccess)
+[[nodiscard]] auto allocateMemory(const vk::Device& device, const vk::PhysicalDevice& physicalDevice, const vk::MemoryRequirements& memoryRequirements, bool shouldHostAccess = true)
 {
 	const auto memoryProperties = physicalDevice.getMemoryProperties();
 	const auto indexedMemoryTypes = getEnumeration(memoryProperties.memoryTypes);

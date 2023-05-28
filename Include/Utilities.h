@@ -114,18 +114,31 @@ template<typename ComparedType>
 	return targetContainer;
 }
 
+// TODO: make these funciton toGlmVec#(ImVec#), and toImVec#(GlmVec#) so we can use glm operations +,-... without the below?
 // ImGui
 [[nodiscard]] inline auto add(const ImVec2& a, const ImVec2& b)
 {
 	return ImVec2{a.x + b.x, a.y + b.y};
 }
+[[nodiscard]] inline auto add(const ImVec4& a, const ImVec4& b)
+{
+	return ImVec4{a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w};
+}
 [[nodiscard]] inline auto subtract(const ImVec2& a, const ImVec2& b)
 {
 	return ImVec2{a.x - b.x, a.y - b.y};
 }
+[[nodiscard]] inline auto subtract(const ImVec4& a, const ImVec4& b)
+{
+	return ImVec4{a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w};
+}
 [[nodiscard]] inline auto scale(const ImVec2& a, const float k)
 {
 	return ImVec2{a.x * k, a.y * k};
+}
+[[nodiscard]] inline auto scale(const ImVec4& a, const float k)
+{
+	return ImVec4{a.x * k, a.y * k, a.z * k, a.w * k};
 }
 [[nodiscard]] inline auto length(const ImVec2& a)
 {

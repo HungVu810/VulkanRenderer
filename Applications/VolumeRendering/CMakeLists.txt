@@ -26,11 +26,6 @@ source_group("Shader" FILES ${SHADERS})
 source_group("Common Source" FILES ${COMMON_SOURCES})
 source_group("Common Include" FILES ${COMMON_INCLUDES})
 
-# Dependencies
-find_package(glm CONFIG REQUIRED)
-find_package(glfw3 CONFIG REQUIRED)
-find_package(cryptopp CONFIG REQUIRED)
-
 # Project
 add_executable(VolumeRendering ${SOURCES} ${COMMON_SOURCES} ${INCLUDES} ${COMMON_INCLUDES} ${SHADERS})
 
@@ -42,13 +37,21 @@ target_include_directories(VolumeRendering PRIVATE
     "${VULKAN_SDK}/Include")
 # target_link_directories
 
-# Libs
-find_package(glm CONFIG REQUIRED)
+# Libs/Dependencies
+# The vulkan package does not provide direct Visual Studio integration.
+# For manual integration, add $(VULKAN_SDK)/include to your include path.
+# https://cmake.org/cmake/help/latest/module/FindVulkan.html
+# find_package(Vulkan REQUIRED)
+# find_package(VulkanHeaders CONFIG REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
+find_package(glm CONFIG REQUIRED)
 find_package(cryptopp CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 target_link_libraries(VolumeRendering PRIVATE
-    ${VULKAN_SDK}/Lib/vulkan-1.lib
+    # Vulkan::Vulkan
+    # Vulkan::Headers
+    # Vulkan::glslc
+    "${VULKAN_SDK}/Lib/vulkan-1.lib"
     glfw
     glm::glm
     cryptopp::cryptopp

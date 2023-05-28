@@ -19,21 +19,29 @@
 // type of graphic program, ie volumn rendering, normal mesh renderng
 // TODO: Split into multiple command buffer with 1 submission? Set event
 // If application want multiple command buffer, it should create its own beside the provided one via ApplicationInfo
+// TODO: port utilities function from os project over
 
 namespace 
 {
 	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
 
-	// TODO: use this, imgui is disabled by default
 	// ImGui
+	// TODO: use this, imgui is disabled by default
 	constexpr auto USE_IMGUI = true;
+	// constexpr auto NUM_TRANSFER_PIXEL = 256;
+	// num transfer pixel is equal to the width of the color spectrum
+	constexpr auto imguiWindowExtent = ImVec2{500, 500}; // the height/width of the histogram/color spectrum
+
+	// Unmodifiable
 	auto histogram = std::vector<float>(200); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
 	struct ControlPoint
 	{
-		ImVec2 position; // With respect to the histogram child window cursor
-		ImColor color; // Picked from the HSV color wheel
+		ImVec2 position; // With respect to the histogram child window cursor, are always whole numbers
+		ImColor color; // With alpha
 	};
 	auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is 
+	//auto transferFunction = Resource{std::vector<glm::vec4>(NUM_TRANSFER_PIXEL, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()};
+	auto transferFunction = Resource{std::vector<glm::vec4>(imguiWindowExtent.x, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
 	auto isImguiInit = false;
 
 	// Application
@@ -45,12 +53,12 @@ namespace
 	// z-y-x order, contains all intensity values of each slide images. Tightly packed
 	// vector instead of array bececause NUM_INTENSITIES is large, occupy the heap instead
 	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // The actual data used for sampling
+	//auto transferFunction = Resource{std::vector<glm::vec4>(NUM_TRANSFER_FUNCTION_IMAGE_PIXEL), toVulkanFormat<glm::vec4>()};
 	auto shaderMap = std::unordered_map<std::string, Shader>{};
-	vk::Image raycastedImage; vk::DeviceMemory raycastedImageMemory;
-	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory;
-	vk::Buffer stagingBuffer; vk::DeviceMemory stagingBufferMemory;
-	vk::ImageView volumeImageView; vk::ImageView raycastedImageView;
-	vk::Sampler volumeImageSampler;
+	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory; vk::ImageView volumeImageView; vk::Buffer volumeImageStagingBuffer; vk::DeviceMemory volumeImageStagingBufferMemory;
+	vk::Image transferImage; vk::DeviceMemory transferImageMemory; vk::ImageView transferImageView; vk::Buffer transferImageStagingBuffer; vk::DeviceMemory transferImageStagingBufferMemory;
+	vk::Image raycastedImage; vk::DeviceMemory raycastedImageMemory; vk::ImageView raycastedImageView;
+	vk::Sampler sampler;
 	vk::DescriptorSetLayout descriptorSetLayout;
 	vk::DescriptorPool descriptorPool;
 	std::vector<vk::DescriptorSet> descriptorSets;
@@ -100,19 +108,87 @@ namespace
 		}
 		for (auto& count : histogram) count /= countMax; // Normalize the count so we use it for scaling later on
 	}
-	void initComputePipeline(const ApplicationInfo& applicationInfo)
+	void setupTransferImageDeviceMemory(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
 	{
 		APPLICATION_INFO_BINDINGS
 
-		// Format check
-		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eStorageImage);
-		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferDst);
-		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferSrc);
+		// Reserve device memory for the transfer image
+		transferImage = device.createImage(vk::ImageCreateInfo{
+			{}
+			, vk::ImageType::e1D
+			, transferFunction.format
+			, vk::Extent3D{static_cast<uint32_t>(transferFunction.data.size()), 1, 1}
+			, 1
+			, 1
+			, vk::SampleCountFlagBits::e1
+			, vk::ImageTiling::eOptimal
+			, vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst
+			, vk::SharingMode::eExclusive
+			, queueFamiliesIndex
+		});
+		transferImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(transferImage), false); // TODO: WHY DOESN'T THIS ALLOW HOST-VISIBLE MEMORY?
+		device.bindImageMemory(transferImage, transferImageMemory, 0); // Associate the image handle to the memory handle
+	}
+	void setupTransferImageStagingBuffer(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
+	{
+		APPLICATION_INFO_BINDINGS
 
-		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eSampledImage);
-		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eTransferDst);
+		// Reserve device memory for staging buffer
+		transferImageStagingBuffer = device.createBuffer(vk::BufferCreateInfo{
+			{}
+			, transferFunction.data.size() * sizeof(glm::vec4)
+			, vk::BufferUsageFlagBits::eTransferSrc
+			, vk::SharingMode::eExclusive
+			, queueFamiliesIndex
+		});
+		const auto stagingBufferMemoryRequirement = device.getBufferMemoryRequirements(transferImageStagingBuffer);
+		transferImageStagingBufferMemory = allocateMemory(device, physicalDevice, stagingBufferMemoryRequirement, true);
+		device.bindBufferMemory(transferImageStagingBuffer, transferImageStagingBufferMemory, 0);
+	}
+	void setupVolumeImageDeviceMemory(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
+	{
+		APPLICATION_INFO_BINDINGS
 
-		const auto queueFamiliesIndex = getQueueFamilyIndices(queueFamilies);
+		volumeImage = device.createImage(vk::ImageCreateInfo{
+			{}
+			, vk::ImageType::e3D
+			, intensities.format
+			, {SLIDE_WIDTH, SLIDE_HEIGHT, NUM_SLIDES}
+			, 1
+			, 1
+			, vk::SampleCountFlagBits::e1
+			, vk::ImageTiling::eOptimal
+			, vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst // Volumn data is transfered from a staging buffer transferSrc
+			, vk::SharingMode::eExclusive
+			, queueFamiliesIndex
+		});
+		volumeImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(volumeImage), false);
+		device.bindImageMemory(volumeImage, volumeImageMemory, 0);
+	}
+	void setupVolumeImageStagingBuffer(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
+	{
+		APPLICATION_INFO_BINDINGS
+
+		// Reserve device memory for staging buffer
+		volumeImageStagingBuffer = device.createBuffer(vk::BufferCreateInfo{
+			{}
+			, TOTAL_SCAN_BYTES
+			, vk::BufferUsageFlagBits::eTransferSrc // Store and transfer volume data to volume image stored on the device memory via a copy command
+			, vk::SharingMode::eExclusive
+			, queueFamiliesIndex
+		});
+		const auto stagingBufferMemoryRequirement = device.getBufferMemoryRequirements(volumeImageStagingBuffer);
+		volumeImageStagingBufferMemory = allocateMemory(device, physicalDevice, stagingBufferMemoryRequirement, true);
+		device.bindBufferMemory(volumeImageStagingBuffer, volumeImageStagingBufferMemory, 0);
+
+		// Upload volume data to the staging buffer, we will transfer this staging buffer data over to the volume image later
+		void* memory = device.mapMemory(volumeImageStagingBufferMemory, 0, stagingBufferMemoryRequirement.size);
+		std::memcpy(memory, intensities.data.data(), TOTAL_SCAN_BYTES);
+		device.unmapMemory(volumeImageStagingBufferMemory);
+	}
+	void setupRaycastedImageDeviceMemory(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
+	{
+		APPLICATION_INFO_BINDINGS
 
 		// Reserve device memory for the raycasted image
 		raycastedImage = device.createImage(vk::ImageCreateInfo{
@@ -128,58 +204,49 @@ namespace
 			, vk::SharingMode::eExclusive
 			, queueFamiliesIndex
 		});
-		raycastedImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(raycastedImage), false); // TODO: WHY DOESN'T THIS ALLOW HOST-VISIBLE MEMORY?
+		raycastedImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(raycastedImage), false);
 		device.bindImageMemory(raycastedImage, raycastedImageMemory, 0);
+	}
 
-		// Reserve device memory for volume image
-		const auto volumeImageCreateInfo =
-		volumeImage = device.createImage(vk::ImageCreateInfo{
-			{}
-			, vk::ImageType::e3D
-			, intensities.format
-			, {SLIDE_WIDTH, SLIDE_HEIGHT, NUM_SLIDES}
-			, 1 // The only mip level for this image
-			, 1 // Single layer, no stereo-rendering
-			, vk::SampleCountFlagBits::e1 // One sample, no multisampling
-			, vk::ImageTiling::eOptimal
-			, vk::ImageUsageFlagBits::eSampled // Sampled by the compute shader
-				| vk::ImageUsageFlagBits::eTransferDst // Volumn data is transfered from a staging buffer transferSrc
-			, vk::SharingMode::eExclusive
-			, queueFamiliesIndex
-		});
-		volumeImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(volumeImage), false); // TODO: WHY DOESN'T THIS ALLOW HOST-VISIBLE MEMORY?
-		device.bindImageMemory(volumeImage, volumeImageMemory, 0);
+	void initComputePipeline(const ApplicationInfo& applicationInfo)
+	{
+		APPLICATION_INFO_BINDINGS
 
-		// Reserve device memory for staging buffer
-		stagingBuffer = device.createBuffer(vk::BufferCreateInfo{
-			{}
-			, TOTAL_SCAN_BYTES
-			, vk::BufferUsageFlagBits::eTransferSrc // Store and transfer volume data to volume image stored on the device memory via a copy command
-			, vk::SharingMode::eExclusive
-			, queueFamiliesIndex
-		});
-		const auto stagingBufferMemoryRequirement = device.getBufferMemoryRequirements(stagingBuffer);
-		stagingBufferMemory = allocateMemory(device, physicalDevice, stagingBufferMemoryRequirement, true); // TODO: WHY THIS ALLOW HOST-VISIBLE MEMORY?
-		device.bindBufferMemory(stagingBuffer, stagingBufferMemory, 0);
+		const auto queueFamiliesIndex = getQueueFamilyIndices(queueFamilies);
 
-		// Upload volume data to the staging buffer, we will transfer this staging buffer data over to the volume image later
-		void* memory = device.mapMemory(stagingBufferMemory, 0, stagingBufferMemoryRequirement.size);
-		std::memcpy(memory, intensities.data.data(), TOTAL_SCAN_BYTES);
-		device.unmapMemory(stagingBufferMemory);
+		// Format check for supporting operations
+		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eStorageImage);
+		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferDst);
+		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferSrc);
 
-		// Create a descriptor for the volumn image and the raycasted image
-		const auto maxDescriptorSets = 1;	
+		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eSampledImage);
+		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eTransferDst);
+
+		checkFormatFeatures(physicalDevice, transferFunction.format, vk::FormatFeatureFlagBits::eSampledImage);
+		checkFormatFeatures(physicalDevice, transferFunction.format, vk::FormatFeatureFlagBits::eTransferDst);
+
+		// Setups
+		setupTransferImageDeviceMemory(applicationInfo, queueFamiliesIndex);
+		setupTransferImageStagingBuffer(applicationInfo, queueFamiliesIndex);
+
+		setupVolumeImageDeviceMemory(applicationInfo, queueFamiliesIndex);
+		setupVolumeImageStagingBuffer(applicationInfo, queueFamiliesIndex);
+
+		setupRaycastedImageDeviceMemory(applicationInfo, queueFamiliesIndex);
+
+		// Describe the size of each used descriptor type and the number of descriptor sets (To check against the association/create layout step)
 		const auto descriptorPoolSizes = std::vector<vk::DescriptorPoolSize>{
-			{vk::DescriptorType::eCombinedImageSampler, 1} // Volume image
+			{vk::DescriptorType::eCombinedImageSampler, 2} // Volume image and transfer image
 			, {vk::DescriptorType::eStorageImage, 1} // Raycasted image
 		};
-		const auto descriptorPoolCreateInfo = vk::DescriptorPoolCreateInfo{
+		descriptorPool = device.createDescriptorPool(vk::DescriptorPoolCreateInfo{
 			{}
-			, maxDescriptorSets
+			, 1
 			, descriptorPoolSizes
-		};
-		descriptorPool = device.createDescriptorPool(descriptorPoolCreateInfo);
-		volumeImageSampler = device.createSampler(vk::SamplerCreateInfo{
+		});
+
+		// Describe the binding numbers of the descriptors (To check against the association step)
+		sampler = device.createSampler(vk::SamplerCreateInfo{
 			{}
 			, vk::Filter::eNearest // TODO: try linear
 			, vk::Filter::eNearest // TODO: try linear
@@ -196,25 +263,34 @@ namespace
 			, 0.0f
 			, vk::BorderColor::eIntOpaqueBlack // Border Color
 			, VK_FALSE // Always normalize coordinate
-
 		});
-		const auto volumnImageBinding = vk::DescriptorSetLayoutBinding{
-			0
-			, vk::DescriptorType::eCombinedImageSampler
-			, vk::ShaderStageFlagBits::eCompute
-			, volumeImageSampler
+		const auto layoutBindings = {
+			// Volumn image
+			vk::DescriptorSetLayoutBinding{
+				0
+				, vk::DescriptorType::eCombinedImageSampler
+				, vk::ShaderStageFlagBits::eCompute
+				, sampler
+			}
+			// Raycasted image
+			, vk::DescriptorSetLayoutBinding{
+				1
+				, vk::DescriptorType::eStorageImage
+				, vk::ShaderStageFlagBits::eCompute
+				, sampler
+			}
+			// Transfer texel buffer
+			, vk::DescriptorSetLayoutBinding{
+				2
+				, vk::DescriptorType::eCombinedImageSampler
+				, vk::ShaderStageFlagBits::eCompute
+				, sampler
+			}
 		};
-		const auto raycastedImageBinding = vk::DescriptorSetLayoutBinding{
-			1
-			, vk::DescriptorType::eStorageImage
-			, vk::ShaderStageFlagBits::eCompute
-			, volumeImageSampler
-		};
-		const auto layoutBindings = {volumnImageBinding, raycastedImageBinding};
 		descriptorSetLayout = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{{}, layoutBindings});
 		descriptorSets = device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{descriptorPool, descriptorSetLayout});
 
-		// Bind the volume image view to the descriptor
+		// Associate the binding numbers to the descriptor sets
 		volumeImageView = device.createImageView(vk::ImageViewCreateInfo{
 			{}
 			, volumeImage
@@ -224,7 +300,7 @@ namespace
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 		auto descriptorImageInfo = vk::DescriptorImageInfo{
-			volumeImageSampler
+			sampler
 			, volumeImageView
 			, vk::ImageLayout::eShaderReadOnlyOptimal // Expected layout of the descriptor
 		};
@@ -236,7 +312,29 @@ namespace
 			, descriptorImageInfo
 		}, {});
 
-		// Bind the raycasted image view to the descriptor
+		transferImageView = device.createImageView(vk::ImageViewCreateInfo{
+			{}
+			, transferImage
+			, vk::ImageViewType::e1D
+			, transferFunction.format
+			, {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity}
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		});
+		descriptorImageInfo = vk::DescriptorImageInfo{
+			sampler
+			, transferImageView 
+			, vk::ImageLayout::eShaderReadOnlyOptimal
+		};
+		device.updateDescriptorSets(vk::WriteDescriptorSet{
+			descriptorSets.front()
+			, 2
+			, 0
+			, vk::DescriptorType::eCombinedImageSampler
+			, descriptorImageInfo
+			, {}
+			, {}
+		}, {});
+
 		raycastedImageView = device.createImageView(vk::ImageViewCreateInfo{
 			{}
 			, raycastedImage
@@ -246,7 +344,7 @@ namespace
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 		descriptorImageInfo = vk::DescriptorImageInfo{
-			volumeImageSampler
+			sampler
 			, raycastedImageView
 			, vk::ImageLayout::eGeneral // Expected layout of the storage descriptor
 		};
@@ -277,6 +375,8 @@ namespace
 		computePipeline = resultValue.value;
 	}
 
+	// TODO: Create a struct RenderFrame in RunInfo that accept a recording function and an optional imgui commands function, will be check against the USE_IMGUI var
+	// Remove isFirstFrame, this can be done in the preRenderLoop function
 	// Private render functions
 	void preRenderLoop(const ApplicationInfo& applicationInfo)
 	{
@@ -288,7 +388,7 @@ namespace
 		initComputePipeline(applicationInfo);
 		submitCommandBufferOnceSynced(device, queue, commandBuffer, [&](const vk::CommandBuffer& commandBuffer){
 			// Volume image layout: undefined -> transferDstOptimal, which is the expected layout when using the copy command
-			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
+			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, vk::ImageMemoryBarrier{
 				vk::AccessFlagBits::eNone
 				, vk::AccessFlagBits::eTransferWrite
 				, vk::ImageLayout::eUndefined
@@ -297,9 +397,9 @@ namespace
 				, VK_QUEUE_FAMILY_IGNORED
 				, volumeImage
 				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-			}});
+			});
 			// Copy the volume data from the staging buffer to the volume image used by the descriptor
-			commandBuffer.copyBufferToImage(stagingBuffer, volumeImage, vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy{
+			commandBuffer.copyBufferToImage(volumeImageStagingBuffer, volumeImage, vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy{
 				0
 				, 0
 				, 0
@@ -311,7 +411,7 @@ namespace
 				}
 				, vk::Offset3D{0, 0, 0}
 				, vk::Extent3D{SLIDE_WIDTH, SLIDE_HEIGHT, NUM_SLIDES}
-				});
+			});
 			// Volume image layout: transferDstOptimal -> shaderReadOnlyOptimal
 			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, {vk::ImageMemoryBarrier{
 				vk::AccessFlagBits::eTransferWrite
@@ -340,23 +440,101 @@ namespace
 			}
 		});
 	}
-	// TODO: Create a struct RenderFrame in RunInfo that accept a recording function and an optional imgui commands function, will be check against the USE_IMGUI var
-	// Remove isFirstFrame, this can be done in the preRenderLoop funcitno
+
+	// Test display updated transfer image? What is this is the first frame, using the transfer texel used in the sahder will be invalid?
+	// Or this is only for the first frame, empty desciprot is not invalid, and the latter frames are good?
+	// Making sure the coordinate of the control points is >= (0,0) ?
+	// Avoid the computation if the controlPoints doesn't change
+	void updateTransferFunction(const std::vector<ControlPoint>& controlPoints, std::vector<glm::vec4>& transferFunction)
+	{
+		if (controlPoints.empty()) return; // First frame, the 2 default control points aren't pushed yet. The transferFunction will have its elements assigned with glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}
+		for (size_t i = 1; i < controlPoints.size(); i++)
+		{
+			const auto colorDirection = subtract(controlPoints[i].color, controlPoints[i - 1].color); // Scaled color vector going from the previous' to this control point's color
+			const auto totalPixels = controlPoints[i].position.x - controlPoints[i - 1].position.x + 1; // The number of pixels that will be assigned by this and the previous control points
+			for (size_t j = 0; j < totalPixels; j++) // Inclusive
+			{
+				const auto interpolatedColor = add(controlPoints[i].color, scale(colorDirection, static_cast<float>(j) / totalPixels)); // Perform linear interpolation
+				transferFunction[controlPoints[i - 1].position.x + j] = glm::vec4{interpolatedColor.x, interpolatedColor.y, interpolatedColor.z, interpolatedColor.w};
+			}
+		}
+	}
+
 	void recordRenderingCommands(const ApplicationInfo& applicationInfo, uint32_t imageIndex, bool isFirstFrame)
 	{
 		APPLICATION_INFO_BINDINGS
 
+		updateTransferFunction(controlPoints, transferFunction.data);
+		// Map the memory handle to the actual device memory (host visible, specified in the allocateMemory()) to upload the data
+		void* memory = device.mapMemory(transferImageStagingBufferMemory, 0, device.getBufferMemoryRequirements(transferImageStagingBuffer).size);
+		std::memcpy(memory, transferFunction.data.data(), transferFunction.data.size() * sizeof(glm::vec4)); // The size should be shared with the setupTransferTex... with a Resource
+		device.unmapMemory(transferImageStagingBufferMemory);
+		// Transfer image layout: undefined -> transferDstOptimal
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, vk::ImageMemoryBarrier{
+			vk::AccessFlagBits::eNone
+			, vk::AccessFlagBits::eTransferWrite
+			, vk::ImageLayout::eUndefined // Default and clear the previous image, BUT DOESN't have to if no new control points are added
+			, vk::ImageLayout::eTransferDstOptimal
+			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+			, VK_QUEUE_FAMILY_IGNORED
+			, transferImage
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		});
+		// Copy the volume data from the staging buffer to the volume image used by the descriptor
+		commandBuffer.copyBufferToImage(transferImageStagingBuffer, transferImage, vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy{
+			0
+			, 0
+			, 0
+			, vk::ImageSubresourceLayers{
+				vk::ImageAspectFlagBits::eColor
+				, 0
+				, 0
+				, 1
+			}
+			, vk::Offset3D{0, 0, 0}
+			, vk::Extent3D{static_cast<uint32_t>(transferFunction.data.size()), 1, 1}
+		});
+		// Transfer image layout: transferDstOptimal -> shaderReadOnlyOptimal
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, {vk::ImageMemoryBarrier{
+			vk::AccessFlagBits::eTransferWrite
+			, vk::AccessFlagBits::eShaderRead
+			, vk::ImageLayout::eTransferDstOptimal
+			, vk::ImageLayout::eShaderReadOnlyOptimal
+			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+			, VK_QUEUE_FAMILY_IGNORED
+			, transferImage
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		}});
+		//transferTexelBufferView = device.createBufferView(vk::BufferViewCreateInfo{
+		//	{}
+		//	, transferTexelBuffer
+		//	, toVulkanFormat<glm::vec4>()
+		//	, 0
+		//	, NUM_TRANSFER_TEXEL * sizeof(glm::vec4)
+		//});
+		//device.updateDescriptorSets(vk::WriteDescriptorSet{
+		//	descriptorSets.front()
+		//	, 2
+		//	, 0
+		//	, vk::DescriptorType::eUniformTexelBuffer
+		//	, {}
+		//	, {}
+		//	, transferTexelBufferView
+		//}, {});
+
+		//////////////////////////////////////
+
 		// Transition layout of the image descriptors before compute pipeline
 		// Raycasted image layout: undefined -> general, expected by the descriptor
 		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, vk::ImageMemoryBarrier{
-				vk::AccessFlagBits::eNone
-				, vk::AccessFlagBits::eShaderWrite
-				, vk::ImageLayout::eUndefined // Default & discard the previous contents of the raycastedImage
-				, vk::ImageLayout::eGeneral
-				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-				, VK_QUEUE_FAMILY_IGNORED
-				, raycastedImage
-				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+			vk::AccessFlagBits::eNone
+			, vk::AccessFlagBits::eShaderWrite
+			, vk::ImageLayout::eUndefined // Default & discard the previous contents of the raycastedImage
+			, vk::ImageLayout::eGeneral
+			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+			, VK_QUEUE_FAMILY_IGNORED
+			, raycastedImage
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 
 		commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, computePipeline);
@@ -368,52 +546,55 @@ namespace
 
 		const auto swapchainImage = device.getSwapchainImagesKHR(swapchain)[imageIndex];
 
-		// Barrier to sync writting to raycastedImage via compute shader and copy it to swapchain image
-		// Raycasted image layout: general -> transferSrc, before copy commmand
+		// Barrier to sync writing to raycasted image via compute shader and copy it to swapchain image
+		// Raycasted image layout: general -> transferSrc, before copy command
 		// Swapchain image layout: undefined -> transferDst, before copy command
-		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {vk::ImageMemoryBarrier{
-			vk::AccessFlagBits::eShaderWrite // Compute shader writes to raycasted image, vk::AccessFlagBits::eShaderWrite, only use this when the shader write to the memory
-			, vk::AccessFlagBits::eTransferRead // Wait until raycasted image is finished written to then copy
-			, vk::ImageLayout::eGeneral
-			, vk::ImageLayout::eTransferSrcOptimal
-			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-			, raycastedImage
-			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-		}, vk::ImageMemoryBarrier{
-			vk::AccessFlagBits::eNone
-			, vk::AccessFlagBits::eTransferWrite // Wait until raycasted image is finished written to then copy
-			, vk::ImageLayout::eUndefined // Default & discard the previous contents of the swapchainImage
-			, vk::ImageLayout::eTransferDstOptimal
-			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-			, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-			, swapchainImage
-			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-		}});
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {
+			vk::ImageMemoryBarrier{
+				vk::AccessFlagBits::eShaderWrite // Compute shader writes to raycasted image, vk::AccessFlagBits::eShaderWrite, only use this when the shader write to the memory
+				, vk::AccessFlagBits::eTransferRead // Wait until raycasted image is finished written to then copy
+				, vk::ImageLayout::eGeneral
+				, vk::ImageLayout::eTransferSrcOptimal
+				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+				, raycastedImage
+				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+			}
+			, vk::ImageMemoryBarrier{
+				vk::AccessFlagBits::eNone
+				, vk::AccessFlagBits::eTransferWrite // Wait until raycasted image is finished written to then copy
+				, vk::ImageLayout::eUndefined // Default & discard the previous contents of the swapchainImage
+				, vk::ImageLayout::eTransferDstOptimal
+				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+				, swapchainImage
+				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+			}
+		});
 
 		// Copy data from the rendered raycasted image via the compute shader to the current swapchain image
 		commandBuffer.copyImage(raycastedImage, vk::ImageLayout::eTransferSrcOptimal, swapchainImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageCopy{
-				vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
-				, {0, 0, 0}
-				, vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
-				, {0, 0, 0}
-				, vk::Extent3D{surfaceExtent, 1}
+			vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
+			, {0, 0, 0}
+			, vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
+			, {0, 0, 0}
+			, vk::Extent3D{surfaceExtent, 1}
 		});
 
 		// Transfer the swapchain image layout back to a presentable layout
 		// Swapchain image layout: transferDst -> presentSrcKHR, before presented
 		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
-				vk::AccessFlagBits::eTransferWrite // written during the copy command
-				, vk::AccessFlagBits::eNone
-				, vk::ImageLayout::eTransferDstOptimal
-				, vk::ImageLayout::eColorAttachmentOptimal// For UI imgui renderpass. Will be transtioned into presentSrcKHR at the end of that renderpass
-				, VK_QUEUE_FAMILY_IGNORED
-				, VK_QUEUE_FAMILY_IGNORED
-				, swapchainImage
-				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+			vk::AccessFlagBits::eTransferWrite // written during the copy command
+			, vk::AccessFlagBits::eNone
+			, vk::ImageLayout::eTransferDstOptimal
+			, vk::ImageLayout::eColorAttachmentOptimal// For UI imgui renderpass. Will be transtioned into presentSrcKHR at the end of that renderpass
+			, VK_QUEUE_FAMILY_IGNORED
+			, VK_QUEUE_FAMILY_IGNORED
+			, swapchainImage
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 	}
-	// TODO: port utilities function from os project over
+
 	void imguiCommands()
 	{
 		//ImGui::ShowDemoWindow();
@@ -434,11 +615,10 @@ namespace
 		if (!isImguiInit)
 		{
 			ImGui::SetWindowPos(ImVec2{0, 0});
-			ImGui::SetWindowSize(ImVec2{500, 500});
+			ImGui::SetWindowSize(imguiWindowExtent);
 		}
 
 		// ------------- color wheel picker
-		// Test with the 2 default control points with defined colors, then show the color  in the chilr window
 		// TODO: Moving the control points around with left mouse when click on empty area, check if drawn circle can be dectedted with imgui function
 		// Add/delete control points, when click on a contol point, a popup shown and prompt (change color or delete)
 		// TODO: HSV color wheel when click with right mouse
@@ -530,11 +710,11 @@ namespace
 							, defaultControlPointColor.Value.z
 							, getAlpha(clickedPositionInChild, histogramAlphaChildExtent)
 						}
-					});
+						});
 					std::ranges::sort(
 						controlPoints
-						, [](const ImVec2& a, const ImVec2& b){return a.x < b.x;}
-						, [](const ControlPoint& controlPoint){return controlPoint.position;}
+						, [](const ImVec2& a, const ImVec2& b) {return a.x < b.x; }
+					, [](const ControlPoint& controlPoint) {return controlPoint.position; }
 					); // Only sort the control points in an ascending order based on the x position
 				}
 				else if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) // If this is false then the popup won't be drawn, we need to seperate openpopup  and beginpopup instaed of placing both in this conditional statement
@@ -576,9 +756,9 @@ namespace
 					const auto lowerRightExtentX = (i + 1) * stepSize * histogramAlphaChildExtent.x;
 					const auto lowerRightExtentY = histogramAlphaChildExtent.y;
 
-					const auto upperLeft = add(childWindowCursor, ImVec2{upperLeftExtentX, upperLeftExtentY});
-					const auto lowerRight = add(childWindowCursor, ImVec2{lowerRightExtentX, lowerRightExtentY});
-					drawList->AddRectFilled(upperLeft, lowerRight, ImColor{0.5f, 0.5f, 0.5f});
+					const auto upperLeft = add(childWindowCursor, ImVec2{ upperLeftExtentX, upperLeftExtentY });
+					const auto lowerRight = add(childWindowCursor, ImVec2{ lowerRightExtentX, lowerRightExtentY });
+					drawList->AddRectFilled(upperLeft, lowerRight, ImColor{ 0.5f, 0.5f, 0.5f });
 				}
 
 				// Draw any connection lines. Draw connection lines first then draw the control points to make the control points ontop of the lines
@@ -587,7 +767,7 @@ namespace
 					drawList->AddLine(
 						add(childWindowCursor, controlPoints[i - 1].position) // The control points are with respect to the child window cursor, we need to offset them to the ImGui screen position before using them
 						, add(childWindowCursor, controlPoints[i].position)
-						, ImColor{1.0f, 1.0f, 1.0f});
+						, ImColor{ 1.0f, 1.0f, 1.0f });
 				}
 
 				// Draw control points
@@ -602,7 +782,7 @@ namespace
 							, controlPoints[i].color.Value.z
 							, 1.0f // We want to see the color, the alpha of this color is implied by the position of the control point in the window and the color spectrum
 						}
-						, 0);
+					, 0);
 				}
 
 				drawList->PopClipRect();
@@ -640,13 +820,13 @@ namespace
 					);
 				}
 
-
 				drawList->PopClipRect();
 
 				ImGui::EndChild();
 				ImGui::PopStyleColor();
 				ImGui::PopStyleVar();
 			}
+
 		}
 
 		ImGui::End();
@@ -662,12 +842,24 @@ namespace
 		device.destroyPipelineLayout(computePipelineLayout);
 		device.destroyShaderModule(volumeShaderModule);
 		device.destroyDescriptorSetLayout(descriptorSetLayout);
-		device.destroySampler(volumeImageSampler);
+		device.destroySampler(sampler);
 		device.destroyDescriptorPool(descriptorPool);
-		device.freeMemory(stagingBufferMemory); device.destroyBuffer(stagingBuffer);
-		device.destroyImageView(volumeImageView); device.destroyImageView(raycastedImageView);
-		device.freeMemory(volumeImageMemory); device.destroyImage(volumeImage);
-		device.freeMemory(raycastedImageMemory); device.destroyImage(raycastedImage);
+
+		device.destroyImageView(volumeImageView);
+		device.freeMemory(volumeImageMemory);
+		device.destroyImage(volumeImage);
+		device.freeMemory(volumeImageStagingBufferMemory);
+		device.destroyBuffer(volumeImageStagingBuffer);
+
+		device.destroyImageView(transferImageView);
+		device.freeMemory(transferImageMemory);
+		device.destroyImage(transferImage);
+		device.freeMemory(transferImageStagingBufferMemory);
+		device.destroyBuffer(transferImageStagingBuffer);
+
+		device.destroyImageView(raycastedImageView);
+		device.freeMemory(raycastedImageMemory);
+		device.destroyImage(raycastedImage);
 	}
 }
 
