@@ -20,6 +20,10 @@
 // TODO: Split into multiple command buffer with 1 submission? Set event
 // If application want multiple command buffer, it should create its own beside the provided one via ApplicationInfo
 // TODO: port utilities function from os project over
+// bezier curve efor the control points
+// TODOD: imgui widgets for ray casting sample sizes, and controling the camera position
+// TODO: control 3 rgb lines instead of control ponts?
+// TODO: not all transferFunction .data is covered (ie, 489 out of 500, due to padding in the transfer window)
 
 namespace 
 {
@@ -33,7 +37,7 @@ namespace
 	constexpr auto imguiWindowExtent = ImVec2{500, 500}; // the height/width of the histogram/color spectrum
 
 	// Unmodifiable
-	auto histogram = std::vector<float>(200); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
+	auto histogram = std::vector<float>(100); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
 	struct ControlPoint
 	{
 		ImVec2 position; // With respect to the histogram child window cursor, are always whole numbers
@@ -42,7 +46,6 @@ namespace
 	auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is 
 	//auto transferFunction = Resource{std::vector<glm::vec4>(NUM_TRANSFER_PIXEL, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()};
 	auto transferFunction = Resource{std::vector<glm::vec4>(imguiWindowExtent.x, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
-	auto isImguiInit = false;
 
 	// Application
 	constexpr auto NUM_SLIDES = 113; // Ratio is 1:1:2, 2 unit of depth
@@ -248,8 +251,10 @@ namespace
 		// Describe the binding numbers of the descriptors (To check against the association step)
 		sampler = device.createSampler(vk::SamplerCreateInfo{
 			{}
-			, vk::Filter::eNearest // TODO: try linear
-			, vk::Filter::eNearest // TODO: try linear
+			//, vk::Filter::eNearest // TODO: try linear
+			, vk::Filter::eLinear
+			//, vk::Filter::eNearest // TODO: try linear
+			, vk::Filter::eLinear
 			, vk::SamplerMipmapMode::eNearest
 			, vk::SamplerAddressMode::eClampToBorder // U
 			, vk::SamplerAddressMode::eClampToBorder // V
@@ -451,11 +456,12 @@ namespace
 		for (size_t i = 1; i < controlPoints.size(); i++)
 		{
 			const auto colorDirection = subtract(controlPoints[i].color, controlPoints[i - 1].color); // Scaled color vector going from the previous' to this control point's color
-			const auto totalPixels = controlPoints[i].position.x - controlPoints[i - 1].position.x + 1; // The number of pixels that will be assigned by this and the previous control points
+			const auto totalPixels = controlPoints[i].position.x - controlPoints[i - 1].position.x; // The number of pixels that will be assigned by this and the previous control points
 			for (size_t j = 0; j < totalPixels; j++) // Inclusive
 			{
 				const auto interpolatedColor = add(controlPoints[i].color, scale(colorDirection, static_cast<float>(j) / totalPixels)); // Perform linear interpolation
-				transferFunction[controlPoints[i - 1].position.x + j] = glm::vec4{interpolatedColor.x, interpolatedColor.y, interpolatedColor.z, interpolatedColor.w};
+				// interpolated color's w (alpha) goes to 0 means hitting the ceilling of the histogram window -> increasing alpha (= 1 - w)
+				transferFunction[controlPoints[i - 1].position.x + j] = glm::vec4{interpolatedColor.x, interpolatedColor.y, interpolatedColor.z, 1.0f - interpolatedColor.w};
 			}
 		}
 	}
@@ -601,8 +607,9 @@ namespace
 		//ImGui::PlotHistogram("Intensity histogram", histogram.data(), histogram.size(), 0, nullptr, 0.0, 1.0, ImVec2{0, 80.0}); // Scale min/max represent the lowest/highest values of the data histogram
 		//const auto& io = ImGui::GetIO();
 
-		// Static, any variable with perserved state
+		// Static, any variable with preserved state
 		static auto hitIndex = std::optional<size_t>{std::nullopt}; // Hold the index of the current hit control point if one exist
+		static auto isDraggingControlPoint = false;
 
 		// Add 2 default control points at the min and max, the user can drag these 2 points but the x axis is fixed, only the y can be manipulated
 		// Added control point will have the color black by default, click on
@@ -610,13 +617,22 @@ namespace
 		// -> interpolate the color of the control points then visualize it on
 		// the color stripe on top of the canvas
 
+		//ImGui::SetNextWindowContentSize(imguiWindowExtent); // needed if imguiWIndowExtent fkup?
+		//ImGui::SetNextWindowPos(ImVec2{0, 0});
+		//ImGui::SetNextWindowSize(ImVec2{imguiWindowExtent.x + ImGui::GetStyle().FramePadding.x, imguiWindowExtent.y});
+		//ImGui::SetNextWindowSize(imguiWindowExtent, ImGuiCond_Always);
+		//ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0});
+		//ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2{0, ImGui::GetStyle().FramePadding.y});
 		ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove); // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
-		// Window default settings	
-		if (!isImguiInit)
-		{
-			ImGui::SetWindowPos(ImVec2{0, 0});
-			ImGui::SetWindowSize(imguiWindowExtent);
-		}
+		ImGui::SetWindowPos(ImVec2{0, 0});
+		ImGui::SetWindowSize(imguiWindowExtent);
+		// ImGui::SetCursorScreenPos(ImVec2{0, 0});
+
+		//Checking value for debugging
+		const auto x = ImGui::GetWindowPos();
+		const auto y = ImGui::GetWindowSize();
+		const auto z = ImGui::GetCursorScreenPos();
+		const auto w = ImGui::GetContentRegionAvail();
 
 		// ------------- color wheel picker
 		// TODO: Moving the control points around with left mouse when click on empty area, check if drawn circle can be dectedted with imgui function
@@ -628,6 +644,7 @@ namespace
 		{
 			// Data
 			const auto drawList = ImGui::GetWindowDrawList();
+
 			const auto colorSpectrumHeightPercentage = 1.0f / 12.0f; // With respect to the transfer function window size
 			const auto colorSpectrumChildExtent = ImVec2{
 				ImGui::GetContentRegionAvail().x
@@ -638,7 +655,7 @@ namespace
 				ImGui::GetContentRegionAvail().x
 				, ImGui::GetContentRegionAvail().y * histogramAlphaHeightPercentage - ImGui::GetStyle().FramePadding.y / 2 // Frame padding divided by 2 because we have 2 widget
 			};
-			const auto defaultControlPointColor = ImColor{1.0f, 1.0f, 1.0f};
+			const auto defaultControlPointColor = ImColor{0.0f, 0.0f, 0.0f};
 			const auto controlPointRadius = 5.0f;
 
 			// Helpers
@@ -646,80 +663,104 @@ namespace
 			{
 				return 1.0f - (controlPointPosition.y / childWindowExtent.y); // Control point's y = 0 (hit the child window's ceilling) means max opacity = 1
 			};
-			const auto getHitControlPointIndex = [&](const ImVec2& cursor, const float tolerance = 0.1f) -> std::optional<size_t> // Return an optional index to a hit control point. Cursor is the cursor of the window in which the user clicks
+			// TODO: return optional iter to hit control point
+			const auto getHitControlPointIndex = [&](const ImVec2& cursor, const float tolerance = 10.0f) -> std::optional<size_t> // Return an optional index to a hit control point. Cursor is the cursor of the window in which the user clicks
 			{
-				const auto cursorPosition = ImGui::GetMousePos();
+				const auto mousePosition = ImGui::GetMousePos();
 				const auto isHit = [&](const ControlPoint& controlPoint)
 				{
-					return length(subtract(add(cursor, controlPoint.position), cursorPosition)) <= controlPointRadius + tolerance; // Add the cursor and the control point position to get to the screent space position instead of the control point being relative to the cursor
+					return length(subtract(add(cursor, controlPoint.position), mousePosition)) <= controlPointRadius + tolerance; // Add the cursor and the control point position to get to the screent space position instead of the control point being relative to the cursor
 				};
 				const auto iterControlPoint = std::ranges::find_if(controlPoints, isHit);
 				if (iterControlPoint == controlPoints.end()) return std::nullopt;
 				else return std::distance(controlPoints.begin(), iterControlPoint);
 			};
 
-			// Two default control points that aren't using the default control point color
-			if (!isImguiInit)
-			{
-				const auto leftMostControlPoint = unnormalizeCoordinate(ImVec2{0.0f, 0.5f}, histogramAlphaChildExtent);
-				controlPoints.push_back(ControlPoint{
-					leftMostControlPoint
-					, ImColor{
-						1.0f
-						, 0.0f
-						, 0.0f
-						, getAlpha(leftMostControlPoint, histogramAlphaChildExtent)
-					}
-				});
-				const auto rightMostControlPoint = unnormalizeCoordinate(ImVec2{1.0f, 0.5f}, histogramAlphaChildExtent);
-				controlPoints.push_back(ControlPoint{
-					rightMostControlPoint
-					, ImColor{
-						0.0f
-						, 1.0f
-						, 0.0f
-						, getAlpha(rightMostControlPoint, histogramAlphaChildExtent)
-					}
-				});
-			}
-
 			// Transfer function canvas for alpha control points and histogram
 			{
 				ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0}); // Needed to avoid padding between the child window and the invisible button/the clip rect, tested with a visible button
 				ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(50, 50, 50, 255));
 				ImGui::BeginChild("Histogram Alpha", histogramAlphaChildExtent, true);
+
 				const auto childWindowCursor = ImGui::GetCursorScreenPos(); // Must be placed above the visible button because we want the cursor of the current child window, not the button
 
-				// Mouse position capture area, push back any captured position (control point) for drawinng
-				ImGui::InvisibleButton("Input position capture", histogramAlphaChildExtent, ImGuiMouseButton_Left | ImGuiMouseButton_Right);
-				if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) // Add new control point
+				// Two default control points that aren't using the default control point color
+				if (controlPoints.empty())
 				{
-					//const auto controlPointIndex = getHitControlPointIndex(childWindowCursor, 5.0f);
-					//if (controlPointIndex != std::nullopt)
-					//{
-					//	Allow moving of this control point, update the control points via sorting on the fly
-					//}
-					//else do the bellow
-					const auto clickedPositionGLFW = ImGui::GetMousePos(); // With respect to the glfw Window
-					const auto clickedPositionInChild = subtract(clickedPositionGLFW, childWindowCursor);
+					// TODO: if the extend is maxX, maxY. Must subtract it by 1 because [0, max) exclusive
+					const auto leftMostControlPoint = unnormalizeCoordinate(ImVec2{0.0f, 0.5f}, histogramAlphaChildExtent);
 					controlPoints.push_back(ControlPoint{
-						clickedPositionInChild
-						, ImColor{
-							defaultControlPointColor.Value.x
-							, defaultControlPointColor.Value.y
-							, defaultControlPointColor.Value.z
-							, getAlpha(clickedPositionInChild, histogramAlphaChildExtent)
+						leftMostControlPoint
+						, ImColor{1.0f, 0.0f, 0.0f, getAlpha(leftMostControlPoint, histogramAlphaChildExtent)
 						}
-						});
-					std::ranges::sort(
-						controlPoints
-						, [](const ImVec2& a, const ImVec2& b) {return a.x < b.x; }
-					, [](const ControlPoint& controlPoint) {return controlPoint.position; }
-					); // Only sort the control points in an ascending order based on the x position
+					});
+					const auto rightMostControlPoint = unnormalizeCoordinate(ImVec2{1.0f, 0.5f}, histogramAlphaChildExtent);
+					controlPoints.push_back(ControlPoint{
+						rightMostControlPoint
+						, ImColor{0.0f, 0.0f, 1.0f, getAlpha(rightMostControlPoint, histogramAlphaChildExtent)
+						}
+					});
 				}
-				else if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) // If this is false then the popup won't be drawn, we need to seperate openpopup  and beginpopup instaed of placing both in this conditional statement
+
+				// Mouse position capture area, push back any captured position (control point) for drawing
+				ImGui::InvisibleButton("Input position capture", histogramAlphaChildExtent, ImGuiMouseButton_Left | ImGuiMouseButton_Right);
+				if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
 				{
-					hitIndex = getHitControlPointIndex(childWindowCursor, 5.0f);
+					if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) // Hovering over doesn't count as clicked, will automatically goes to the else if if dragging a control point
+					{
+						hitIndex = getHitControlPointIndex(childWindowCursor);
+						if (hitIndex != std::nullopt) isDraggingControlPoint = true;
+						else // Add new control point
+						{
+							const auto clickedPositionGLFW = ImGui::GetMousePos(); // With respect to the glfw Window
+							const auto clickedPositionInChild = subtract(clickedPositionGLFW, childWindowCursor); // with respect to the child window button
+							controlPoints.push_back(ControlPoint{
+								clickedPositionInChild
+								, ImColor{
+									defaultControlPointColor.Value.x
+									, defaultControlPointColor.Value.y
+									, defaultControlPointColor.Value.z
+									, getAlpha(clickedPositionInChild, histogramAlphaChildExtent)
+								}
+								});
+							std::ranges::sort(controlPoints, [](const ImVec2& a, const ImVec2& b) {return a.x < b.x;}, [](const ControlPoint& controlPoint) {return controlPoint.position;}); // Only sort the control points in an ascending order based on the x position
+						}
+					}
+					else if (isDraggingControlPoint) // Only changing the y axis
+					{
+						const auto clickedPositionGLFW = ImGui::GetMousePos(); // With respect to the glfw Window
+						auto clickedPositionInChild = subtract(clickedPositionGLFW, childWindowCursor);
+
+						// Clipping, constraint the draggable area
+						auto iterControlPoint = controlPoints.begin();
+						std::advance(iterControlPoint, hitIndex.value());
+						if (clickedPositionInChild.y < 0.0f) clickedPositionInChild.y = 0.0f;
+						else if (clickedPositionInChild.y > histogramAlphaChildExtent.y - 1) clickedPositionInChild.y = histogramAlphaChildExtent.y - 1;
+						// Restrict to only y-axis if dragging the control point at either ends
+						if (iterControlPoint != controlPoints.begin() && iterControlPoint != controlPoints.end() - 1)
+						{
+							if (clickedPositionInChild.x < 0.0f) clickedPositionInChild.x = 0.0f;
+							else if (clickedPositionInChild.x > histogramAlphaChildExtent.x - 1) clickedPositionInChild.x = histogramAlphaChildExtent.x - 1;
+						}
+						else clickedPositionInChild.x = iterControlPoint->position.x;
+						iterControlPoint->position.y = clickedPositionInChild.y;
+						iterControlPoint->position.x = clickedPositionInChild.x;
+						// Update the alpha after shifted to a new position
+						iterControlPoint->color.Value.w = getAlpha(clickedPositionInChild, histogramAlphaChildExtent);
+
+						std::ranges::sort(controlPoints, [](const ImVec2& a, const ImVec2& b) {return a.x < b.x;}, [](const ControlPoint& controlPoint) {return controlPoint.position;}); // Only sort the control points in an ascending order based on the x position
+						// Update the hitIndex location after sorted
+						const auto samePosition = [&](const ControlPoint& controlPoint){return controlPoint.position.x == clickedPositionInChild.x && controlPoint.position.y == clickedPositionInChild.y;};
+						iterControlPoint = std::ranges::find_if(controlPoints, samePosition);
+						assert(iterControlPoint != controlPoints.end()); // Sanity check
+						hitIndex = std::distance(controlPoints.begin(), iterControlPoint);
+					}
+				}
+				else isDraggingControlPoint = false;
+
+				if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) // If this is false then the popup won't be drawn, we need to seperate openpopup  and beginpopup instaed of placing both in this conditional statement
+				{
+					hitIndex = getHitControlPointIndex(childWindowCursor);
 					if (hitIndex != std::nullopt)
 					{
 						ImGui::OpenPopup("Input position capture");
@@ -733,13 +774,17 @@ namespace
 					//{
 					//	ImGui::OpenPopup("Change color");
 					//}
-
 					// Casting the address of the color of the current hit control point to float[3]. Since ImColor is the same as float[4], it is valid to do this.
-					if (ImGui::ColorPicker3("###", (float*)&(controlPoints[hitIndex.value()].color), ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha))
+					ImGui::ColorPicker3("###", (float*)&(controlPoints[hitIndex.value()].color), ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha);
+					if (ImGui::MenuItem("Delete") )
 					{
-
+						auto iterControlPoint = controlPoints.begin();
+						std::advance(iterControlPoint, hitIndex.value());
+						// Can't delete the first and the final control points
+						if (controlPoints.size() > 2
+							&& iterControlPoint != controlPoints.begin()
+							&& iterControlPoint != controlPoints.end() - 1) controlPoints.erase(iterControlPoint);
 					}
-					ImGui::MenuItem("Delete"); // Can't delete the first and the final control points
 					ImGui::EndPopup();
 				}
 
@@ -830,8 +875,7 @@ namespace
 		}
 
 		ImGui::End();
-
-		isImguiInit = true;
+		//ImGui::PopStyleVar(1);
 	}
 
 	void postRenderLoop(const ApplicationInfo& applicationInfo)

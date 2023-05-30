@@ -117,12 +117,14 @@ ViewPyramid initViewPyramid()
 	const vec3 viewPyramidSide = cross(viewPyramidForward, viewPyramidUp);
 	// The corners are the side of the cube if the image suddenly has edge corners due to perespective projection when adjusting the viewPyramidLocation/viewPyramidHeight
 	const vec3 viewPyramidLocation = vec3(0, -5, -0.5); // -0.5 z in the middle of the volume sample space
+	//const vec3 viewPyramidLocation = vec3(0, 0, 5); // -0.5 z in the middle of the volume sample space
 	const float viewPyramidHeight = 5; // The base of the view pyramid should be ideally right on top of the side of the sampled volume
 
 	// To rotate the viewPyramid forward, up and side 
 	// Because the volume dimension is 1, rotating radian need to be small to compensate
 	const float pi = acos(-1);
 	const float pitchRad = pi / 2; // Around X
+	//const float pitchRad = 0; // Around X
 	const float yawRad = 0; // Around Y
 	const float rollRad = 0; // Around Z
 
@@ -208,7 +210,7 @@ void main()
 	// Camera has its own cooridate, seperated from the world cooridnate
 	// Camera transformation matrix is given to the image grid as well
 
-	uint samples = 30; // The samples >= 0 within the 2 defaults samples at each extremes tMin and tMax, 113 slides
+	uint samples = 254; // The samples >= 0 within the 2 defaults samples at each extremes tMin and tMax, 113 slides
 	vec3 clearColor = vec3(0, 0, 0); // For pixels that doesn't hit
 	vec3 pixelColor = vec3(0);
 
