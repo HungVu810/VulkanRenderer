@@ -12,6 +12,7 @@
 #include <cassert>
 
 #define APPLICATION_INFO_BINDINGS const auto& [window, instance, surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, commandBuffer] = applicationInfo;
+// #define APPLICATION_INFO_BINDINGS const auto& [window, instance, surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, commandBuffer] = getApplicationInfo(); // asert throw if not init, return reference
 
 // constexpr, consteval
 // create a appThread class that takes works and assigned with enum of the current work
@@ -24,39 +25,32 @@
 // TODOD: imgui widgets for ray casting sample sizes, and controling the camera position
 // TODO: control 3 rgb lines instead of control ponts?
 // TODO: not all transferFunction .data is covered (ie, 489 out of 500, due to padding in the transfer window)
+// TODO: checkot imgui tips for using math on imvec
+//TODO: Don't share imgui renderpass with application renderpass, do this first beforer attempt the below
+//TODO: Check if the runInfo already provdie a renderpass, grpahic pipeline, framebuffer,...?
+//TODO: A variable to toggle imgui log messages
+// TODO: Create a struct RenderFrame in RunInfo that accept a recording function and an optional imgui commands function, will be check against the USE_IMGUI var
+// TODO: Remove isFirstFrame, this can be done in the preRenderLoop function
+// TODO: Avoid the computation if the controlPoints doesn't change
+// todo: totalPixels != imguiWindowExtents.width
+//ImGuiIO& io = ImGui::GetIO(); (void)io;
+//io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+//// Setup Dear ImGui style
+//ImGui::StyleColorsDark();
+////ImGui::StyleColorsLight();
 
 namespace 
 {
-	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
-
-	// ImGui
-	// TODO: use this, imgui is disabled by default
-	constexpr auto USE_IMGUI = true;
-	// constexpr auto NUM_TRANSFER_PIXEL = 256;
-	// num transfer pixel is equal to the width of the color spectrum
-	constexpr auto imguiWindowExtent = ImVec2{500, 500}; // the height/width of the histogram/color spectrum
-
-	// Unmodifiable
-	auto histogram = std::vector<float>(100); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
-	struct ControlPoint
-	{
-		ImVec2 position; // With respect to the histogram child window cursor, are always whole numbers
-		ImColor color; // With alpha
-	};
-	auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is 
-	//auto transferFunction = Resource{std::vector<glm::vec4>(NUM_TRANSFER_PIXEL, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()};
-	auto transferFunction = Resource{std::vector<glm::vec4>(imguiWindowExtent.x, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
-
 	// Application
+	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
 	constexpr auto NUM_SLIDES = 113; // Ratio is 1:1:2, 2 unit of depth
 	constexpr auto SLIDE_HEIGHT = 256;
 	constexpr auto SLIDE_WIDTH = 256;
 	constexpr auto NUM_INTENSITIES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
 	constexpr auto TOTAL_SCAN_BYTES = NUM_INTENSITIES * sizeof(Intensity);
-	// z-y-x order, contains all intensity values of each slide images. Tightly packed
-	// vector instead of array bececause NUM_INTENSITIES is large, occupy the heap instead
+	// z-y-x order, contains all intensity values of each slide images. Tightly packed vector instead of array because NUM_INTENSITIES is large, occupy the heap instead
 	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // The actual data used for sampling
-	//auto transferFunction = Resource{std::vector<glm::vec4>(NUM_TRANSFER_FUNCTION_IMAGE_PIXEL), toVulkanFormat<glm::vec4>()};
 	auto shaderMap = std::unordered_map<std::string, Shader>{};
 	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory; vk::ImageView volumeImageView; vk::Buffer volumeImageStagingBuffer; vk::DeviceMemory volumeImageStagingBufferMemory;
 	vk::Image transferImage; vk::DeviceMemory transferImageMemory; vk::ImageView transferImageView; vk::Buffer transferImageStagingBuffer; vk::DeviceMemory transferImageStagingBufferMemory;
@@ -69,7 +63,18 @@ namespace
 	vk::PipelineLayout computePipelineLayout;
 	vk::Pipeline computePipeline;
 
-	// Private helpers
+	// ImGui
+	struct ControlPoint
+	{
+		ImVec2 position; // With respect to the histogram child window cursor, are always whole numbers
+		ImColor color; // With alpha
+	};
+	constexpr auto imguiWindowExtent = ImVec2{500, 500}; // The height/width of the histogram/color spectrum
+	auto histogram = std::vector<float>(100); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
+	auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is relative to the histogram window cursor
+	// Num transfer pixel is equal to the width of the color spectrum
+	auto transferFunction = Resource{std::vector<glm::vec4>(imguiWindowExtent.x, glm::vec4{1.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
+
 	void loadVolumeData()
 	{
 		auto dataIndex = 0;
@@ -111,9 +116,11 @@ namespace
 		}
 		for (auto& count : histogram) count /= countMax; // Normalize the count so we use it for scaling later on
 	}
-	void setupTransferImageDeviceMemory(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
+	void setupTransferImageDeviceMemory(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
+
+		const auto queueFamiliesIndex = std::views::elements<0>(queueFamilies) | std::ranges::to<std::vector>();
 
 		// Reserve device memory for the transfer image
 		transferImage = device.createImage(vk::ImageCreateInfo{
@@ -132,9 +139,11 @@ namespace
 		transferImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(transferImage), false); // TODO: WHY DOESN'T THIS ALLOW HOST-VISIBLE MEMORY?
 		device.bindImageMemory(transferImage, transferImageMemory, 0); // Associate the image handle to the memory handle
 	}
-	void setupTransferImageStagingBuffer(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
+	void setupTransferImageStagingBuffer(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
+
+		const auto queueFamiliesIndex = std::views::elements<0>(queueFamilies) | std::ranges::to<std::vector>();
 
 		// Reserve device memory for staging buffer
 		transferImageStagingBuffer = device.createBuffer(vk::BufferCreateInfo{
@@ -148,9 +157,11 @@ namespace
 		transferImageStagingBufferMemory = allocateMemory(device, physicalDevice, stagingBufferMemoryRequirement, true);
 		device.bindBufferMemory(transferImageStagingBuffer, transferImageStagingBufferMemory, 0);
 	}
-	void setupVolumeImageDeviceMemory(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
+	void setupVolumeImageDeviceMemory(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
+
+		const auto queueFamiliesIndex = std::views::elements<0>(queueFamilies) | std::ranges::to<std::vector>();
 
 		volumeImage = device.createImage(vk::ImageCreateInfo{
 			{}
@@ -168,9 +179,11 @@ namespace
 		volumeImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(volumeImage), false);
 		device.bindImageMemory(volumeImage, volumeImageMemory, 0);
 	}
-	void setupVolumeImageStagingBuffer(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
+	void setupVolumeImageStagingBuffer(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
+
+		const auto queueFamiliesIndex = std::views::elements<0>(queueFamilies) | std::ranges::to<std::vector>();
 
 		// Reserve device memory for staging buffer
 		volumeImageStagingBuffer = device.createBuffer(vk::BufferCreateInfo{
@@ -189,9 +202,11 @@ namespace
 		std::memcpy(memory, intensities.data.data(), TOTAL_SCAN_BYTES);
 		device.unmapMemory(volumeImageStagingBufferMemory);
 	}
-	void setupRaycastedImageDeviceMemory(const ApplicationInfo& applicationInfo, const std::vector<QueueFamilyIndex>& queueFamiliesIndex)
+	void setupRaycastedImageDeviceMemory(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
+
+		const auto queueFamiliesIndex = std::views::elements<0>(queueFamilies) | std::ranges::to<std::vector>();
 
 		// Reserve device memory for the raycasted image
 		raycastedImage = device.createImage(vk::ImageCreateInfo{
@@ -210,32 +225,9 @@ namespace
 		raycastedImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(raycastedImage), false);
 		device.bindImageMemory(raycastedImage, raycastedImageMemory, 0);
 	}
-
-	void initComputePipeline(const ApplicationInfo& applicationInfo)
+	void initDescriptorPool(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
-
-		const auto queueFamiliesIndex = getQueueFamilyIndices(queueFamilies);
-
-		// Format check for supporting operations
-		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eStorageImage);
-		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferDst);
-		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferSrc);
-
-		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eSampledImage);
-		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eTransferDst);
-
-		checkFormatFeatures(physicalDevice, transferFunction.format, vk::FormatFeatureFlagBits::eSampledImage);
-		checkFormatFeatures(physicalDevice, transferFunction.format, vk::FormatFeatureFlagBits::eTransferDst);
-
-		// Setups
-		setupTransferImageDeviceMemory(applicationInfo, queueFamiliesIndex);
-		setupTransferImageStagingBuffer(applicationInfo, queueFamiliesIndex);
-
-		setupVolumeImageDeviceMemory(applicationInfo, queueFamiliesIndex);
-		setupVolumeImageStagingBuffer(applicationInfo, queueFamiliesIndex);
-
-		setupRaycastedImageDeviceMemory(applicationInfo, queueFamiliesIndex);
 
 		// Describe the size of each used descriptor type and the number of descriptor sets (To check against the association/create layout step)
 		const auto descriptorPoolSizes = std::vector<vk::DescriptorPoolSize>{
@@ -247,6 +239,10 @@ namespace
 			, 1
 			, descriptorPoolSizes
 		});
+	}
+	void initDescriptorSets(const ApplicationInfo& applicationInfo)
+	{
+		APPLICATION_INFO_BINDINGS
 
 		// Describe the binding numbers of the descriptors (To check against the association step)
 		sampler = device.createSampler(vk::SamplerCreateInfo{
@@ -270,7 +266,7 @@ namespace
 			, VK_FALSE // Always normalize coordinate
 		});
 		const auto layoutBindings = {
-			// Volumn image
+			// Volume image
 			vk::DescriptorSetLayoutBinding{
 				0
 				, vk::DescriptorType::eCombinedImageSampler
@@ -294,6 +290,30 @@ namespace
 		};
 		descriptorSetLayout = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{{}, layoutBindings});
 		descriptorSets = device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{descriptorPool, descriptorSetLayout});
+	}
+	void initComputePipeline(const ApplicationInfo& applicationInfo)
+	{
+		APPLICATION_INFO_BINDINGS
+
+		// Format check for supporting operations
+		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eStorageImage);
+		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferDst);
+		checkFormatFeatures(physicalDevice, surfaceFormat, vk::FormatFeatureFlagBits::eTransferSrc);
+		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eSampledImage);
+		checkFormatFeatures(physicalDevice, intensities.format, vk::FormatFeatureFlagBits::eTransferDst);
+		checkFormatFeatures(physicalDevice, transferFunction.format, vk::FormatFeatureFlagBits::eSampledImage);
+		checkFormatFeatures(physicalDevice, transferFunction.format, vk::FormatFeatureFlagBits::eTransferDst);
+
+		// Setups
+		setupTransferImageDeviceMemory(applicationInfo);
+		setupTransferImageStagingBuffer(applicationInfo);
+		setupVolumeImageDeviceMemory(applicationInfo);
+		setupVolumeImageStagingBuffer(applicationInfo);
+		setupRaycastedImageDeviceMemory(applicationInfo);
+
+		// Inits
+		initDescriptorPool(applicationInfo);
+		initDescriptorSets(applicationInfo);
 
 		// Associate the binding numbers to the descriptor sets
 		volumeImageView = device.createImageView(vk::ImageViewCreateInfo{
@@ -379,10 +399,6 @@ namespace
 		if (resultValue.result != vk::Result::eSuccess) throw std::runtime_error{"Unable to create a compute pipeline."};
 		computePipeline = resultValue.value;
 	}
-
-	// TODO: Create a struct RenderFrame in RunInfo that accept a recording function and an optional imgui commands function, will be check against the USE_IMGUI var
-	// Remove isFirstFrame, this can be done in the preRenderLoop function
-	// Private render functions
 	void preRenderLoop(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
@@ -446,27 +462,27 @@ namespace
 		});
 	}
 
-	// Test display updated transfer image? What is this is the first frame, using the transfer texel used in the sahder will be invalid?
-	// Or this is only for the first frame, empty desciprot is not invalid, and the latter frames are good?
-	// Making sure the coordinate of the control points is >= (0,0) ?
-	// Avoid the computation if the controlPoints doesn't change
 	void updateTransferFunction(const std::vector<ControlPoint>& controlPoints, std::vector<glm::vec4>& transferFunction)
 	{
 		if (controlPoints.empty()) return; // First frame, the 2 default control points aren't pushed yet. The transferFunction will have its elements assigned with glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}
-		for (size_t i = 1; i < controlPoints.size(); i++)
+		for (const auto& [i, controlPoint] : std::views::enumerate(controlPoints))
 		{
+			if (i == 0) continue;
 			const auto colorDirection = subtract(controlPoints[i].color, controlPoints[i - 1].color); // Scaled color vector going from the previous' to this control point's color
 			const auto totalPixels = controlPoints[i].position.x - controlPoints[i - 1].position.x; // The number of pixels that will be assigned by this and the previous control points
-			for (size_t j = 0; j < totalPixels; j++) // Inclusive
+			for (const auto j : std::views::iota(0, totalPixels)) // Inclusive
 			{
 				const auto interpolatedColor = add(controlPoints[i].color, scale(colorDirection, static_cast<float>(j) / totalPixels)); // Perform linear interpolation
-				// interpolated color's w (alpha) goes to 0 means hitting the ceilling of the histogram window -> increasing alpha (= 1 - w)
-				transferFunction[controlPoints[i - 1].position.x + j] = glm::vec4{interpolatedColor.x, interpolatedColor.y, interpolatedColor.z, 1.0f - interpolatedColor.w};
+				transferFunction[controlPoints[i - 1].position.x + j] = glm::vec4{
+					interpolatedColor.x
+					, interpolatedColor.y
+					, interpolatedColor.z
+					, 1.0f - interpolatedColor.w // Interpolated color's w (alpha) goes to 0 means hitting the ceiling of the histogram window -> increasing alpha (= 1 - w)
+				};
 			}
 		}
 	}
-
-	void recordRenderingCommands(const ApplicationInfo& applicationInfo, uint32_t imageIndex, bool isFirstFrame)
+	void updateTransferImage(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
 
@@ -511,24 +527,13 @@ namespace
 			, transferImage
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		}});
-		//transferTexelBufferView = device.createBufferView(vk::BufferViewCreateInfo{
-		//	{}
-		//	, transferTexelBuffer
-		//	, toVulkanFormat<glm::vec4>()
-		//	, 0
-		//	, NUM_TRANSFER_TEXEL * sizeof(glm::vec4)
-		//});
-		//device.updateDescriptorSets(vk::WriteDescriptorSet{
-		//	descriptorSets.front()
-		//	, 2
-		//	, 0
-		//	, vk::DescriptorType::eUniformTexelBuffer
-		//	, {}
-		//	, {}
-		//	, transferTexelBufferView
-		//}, {});
 
-		//////////////////////////////////////
+	}
+	void renderCommands(const ApplicationInfo& applicationInfo, uint32_t imageIndex, bool isFirstFrame)
+	{
+		APPLICATION_INFO_BINDINGS
+
+		updateTransferImage(applicationInfo);
 
 		// Transition layout of the image descriptors before compute pipeline
 		// Raycasted image layout: undefined -> general, expected by the descriptor
@@ -586,21 +591,7 @@ namespace
 			, {0, 0, 0}
 			, vk::Extent3D{surfaceExtent, 1}
 		});
-
-		// Transfer the swapchain image layout back to a presentable layout
-		// Swapchain image layout: transferDst -> presentSrcKHR, before presented
-		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
-			vk::AccessFlagBits::eTransferWrite // written during the copy command
-			, vk::AccessFlagBits::eNone
-			, vk::ImageLayout::eTransferDstOptimal
-			, vk::ImageLayout::eColorAttachmentOptimal// For UI imgui renderpass. Will be transtioned into presentSrcKHR at the end of that renderpass
-			, VK_QUEUE_FAMILY_IGNORED
-			, VK_QUEUE_FAMILY_IGNORED
-			, swapchainImage
-			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-		});
 	}
-
 	void imguiCommands()
 	{
 		//ImGui::ShowDemoWindow();
@@ -629,10 +620,10 @@ namespace
 		// ImGui::SetCursorScreenPos(ImVec2{0, 0});
 
 		//Checking value for debugging
-		const auto x = ImGui::GetWindowPos();
-		const auto y = ImGui::GetWindowSize();
-		const auto z = ImGui::GetCursorScreenPos();
-		const auto w = ImGui::GetContentRegionAvail();
+		//const auto x = ImGui::GetWindowPos();
+		//const auto y = ImGui::GetWindowSize();
+		//const auto z = ImGui::GetCursorScreenPos();
+		//const auto w = ImGui::GetContentRegionAvail();
 
 		// ------------- color wheel picker
 		// TODO: Moving the control points around with left mouse when click on empty area, check if drawn circle can be dectedted with imgui function
@@ -701,6 +692,7 @@ namespace
 						}
 					});
 				}
+				assert(controlPoints.front().position.y >= 0 && controlPoints.back().position.y >= 0);
 
 				// Mouse position capture area, push back any captured position (control point) for drawing
 				ImGui::InvisibleButton("Input position capture", histogramAlphaChildExtent, ImGuiMouseButton_Left | ImGuiMouseButton_Right);
@@ -914,7 +906,7 @@ int main()
 		{}
 		, {}
 		, preRenderLoop
-		, recordRenderingCommands
+		, renderCommands
 		, imguiCommands
 		, postRenderLoop
 		, "Volume Rendering"

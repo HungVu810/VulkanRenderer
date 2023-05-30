@@ -33,118 +33,116 @@ namespace
 		if (!isValidationLayersEnabled) return strings;
 		const auto validationLayerName = std::string{"VK_LAYER_KHRONOS_validation"};
 		const auto layersProperties = vk::enumerateInstanceLayerProperties();
-		const auto getLayerName = [](const vk::LayerProperties& layerProperties) { return std::string_view(layerProperties.layerName); };
-		const auto layersName = layersProperties | std::views::transform(getLayerName);
-		const auto isSupported = std::ranges::find(layersName, validationLayerName) != std::end(layersName);
+		const auto isSupported = std::ranges::find(layersProperties, validationLayerName, [](const auto& layerProperties){return std::string_view(layerProperties.layerName);}) != std::end(layersProperties);
 		if (!isSupported) throw std::runtime_error{"Requested validation layers name can't be found."};
 		strings.push_back(validationLayerName);
 		return strings;
 	}
 	[[nodiscard]] auto getEnabledInstanceExtensionsName()
 	{
-		auto extensionCount = uint32_t{ 0 };
+		auto extensionCount = uint32_t{0};
 		const auto glfwExtensionsRawName = glfwGetRequiredInstanceExtensions(&extensionCount);
 		if (!glfwExtensionsRawName) throw std::runtime_error{"Vulkan's surface extensions for window creation can not be found"};
-		auto extensionsName = std::vector<std::string>{ glfwExtensionsRawName, glfwExtensionsRawName + extensionCount };
+		auto extensionsName = std::vector<std::string>{glfwExtensionsRawName, glfwExtensionsRawName + extensionCount};
 		if (isValidationLayersEnabled) extensionsName.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		return extensionsName;
 	}
 	[[nodiscard]] auto getDeviceExtensionsName() noexcept
 	{
-		return std::vector<std::string>{ VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+		return std::vector<std::string>{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 	}
 	[[nodiscard]] auto getSurfaceAttributes(const vk::SurfaceKHR& surface, const vk::PhysicalDevice& physicalDevice) noexcept
 	{
-		return SurfaceAttributes {
-			.capabilities = physicalDevice.getSurfaceCapabilitiesKHR(surface),
-			.formats = physicalDevice.getSurfaceFormatsKHR(surface),
-			.presentModes = physicalDevice.getSurfacePresentModesKHR(surface)
+		return SurfaceAttributes{
+			physicalDevice.getSurfaceCapabilitiesKHR(surface),
+			physicalDevice.getSurfaceFormatsKHR(surface),
+			physicalDevice.getSurfacePresentModesKHR(surface)
 		};
 	}
 	[[nodiscard]] auto getSuitablePhysicalDevice(const std::vector<vk::PhysicalDevice>& physicalDevices, const vk::SurfaceKHR& surface)
 	{
 		const auto deviceExtensionsName = getDeviceExtensionsName();
-		const auto isSuitable = [&](const vk::PhysicalDevice& physicalDevice)
+		auto suitablePhysicalDevices = physicalDevices | std::views::filter([&](const vk::PhysicalDevice& physicalDevice)
 		{
-			const auto deviceProperties = vk::PhysicalDeviceProperties{physicalDevice.getProperties()};
-			const auto deviceFeatures = vk::PhysicalDeviceFeatures{physicalDevice.getFeatures()};
-			const auto getExtensionName = [](const vk::ExtensionProperties& properties)
+			const auto surfaceAttributes = getSurfaceAttributes(surface, physicalDevice);
+			const auto deviceProperties = physicalDevice.getProperties();
+			const auto deviceFeatures = physicalDevice.getFeatures();
+			const auto supportedDeviceExtensionsName = physicalDevice.enumerateDeviceExtensionProperties() | std::views::transform([](const vk::ExtensionProperties& properties)
 			{
 				return static_cast<std::string_view>(properties.extensionName);
-			};
-			const auto supportedDeviceExtensionsName = physicalDevice.enumerateDeviceExtensionProperties() | std::views::transform(getExtensionName);
-			const auto surfaceAttributes = getSurfaceAttributes(surface, physicalDevice);
-			const auto isSupported = [&](const std::string_view& deviceExtensionName)
-			{
-				return std::ranges::find(supportedDeviceExtensionsName, deviceExtensionName) != supportedDeviceExtensionsName.end();
-			};
+			});
 			return deviceFeatures.geometryShader
-				&& std::ranges::all_of(deviceExtensionsName, isSupported)
 				&& !surfaceAttributes.formats.empty()
-				&& !surfaceAttributes.presentModes.empty();
-		};
-		auto suitablePhysicalDevices = physicalDevices | std::views::filter(isSuitable);
+				&& !surfaceAttributes.presentModes.empty()
+				&& std::ranges::all_of(deviceExtensionsName, [&](const std::string_view& deviceExtensionName)
+				{
+					return std::ranges::find(supportedDeviceExtensionsName, deviceExtensionName) != supportedDeviceExtensionsName.end();
+				});
+		});
 		if (suitablePhysicalDevices.empty()) throw std::runtime_error{ "Can't find a suitable GPU." };
-		const auto isDiscrete = [](const vk::PhysicalDevice& physicalDevice)
+		const auto discretePhysicalDeviceIter = std::ranges::find_if(suitablePhysicalDevices, [](const vk::PhysicalDevice& physicalDevice)
 		{
 			return physicalDevice.getProperties().deviceType == vk::PhysicalDeviceType::eDiscreteGpu;
-		};
-		const auto discretePhysicalDeviceIter = std::ranges::find_if(suitablePhysicalDevices, isDiscrete);
-		if (discretePhysicalDeviceIter == suitablePhysicalDevices.end())
+		});
+		if (discretePhysicalDeviceIter != suitablePhysicalDevices.end()) return *discretePhysicalDeviceIter;
+		else
 		{
 			std::cout << tag::warning << "Using a non-discrete device for rendering.\n";
 			return suitablePhysicalDevices.front(); // Just using a random integrated device
 		}
-		else return *discretePhysicalDeviceIter;
 	}
 	[[nodiscard]] auto getSuitableSurfaceFormat(const std::vector<vk::SurfaceFormatKHR>& surfaceFormats) noexcept
 	{
-		const auto isSuitable = [](const vk::SurfaceFormatKHR& surfaceFormat)
+		const auto surfaceFormatIter = std::ranges::find_if(surfaceFormats, [](const vk::SurfaceFormatKHR& surfaceFormat)
 		{
 			return surfaceFormat.format == toVulkanFormat<format::Image>()
 				&& surfaceFormat.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear;
-		};
-		const auto surfaceFormatIter = std::ranges::find_if(surfaceFormats, isSuitable);
-		if (surfaceFormatIter == surfaceFormats.end()) return surfaceFormats.at(0);
-		else return *surfaceFormatIter;
+		});
+		if (surfaceFormatIter != surfaceFormats.end()) return *surfaceFormatIter; 
+		else return surfaceFormats.front();
 	}
 	[[nodiscard]] auto getSuitablePresentMode(const std::vector<vk::PresentModeKHR>& presentModes) noexcept
 	{
-		const auto isSuitable = [](const vk::PresentModeKHR& presentMode) { return presentMode == vk::PresentModeKHR::eMailbox; };
-		const auto presentModesIter = std::ranges::find_if(presentModes, isSuitable);
-		if (presentModesIter == presentModes.end()) return vk::PresentModeKHR::eFifo;
-		else return *presentModesIter;
+		const auto presentModesIter = std::ranges::find_if(presentModes, [](const vk::PresentModeKHR& presentMode)
+		{
+			return presentMode == vk::PresentModeKHR::eMailbox;
+		});
+		if (presentModesIter != presentModes.end()) return *presentModesIter;
+		else return vk::PresentModeKHR::eFifo;
 	}
 	[[nodiscard]] auto getSuitableSurfaceExtent(GLFWwindow* window, const vk::SurfaceCapabilitiesKHR& surfaceCapabilities) noexcept
 	{
 		if (surfaceCapabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) return surfaceCapabilities.currentExtent;
 		else
 		{
-			auto width = int{ 0 };
-			auto height = int{ 0 };
+			auto width = int{0};
+			auto height = int{0};
 			glfwGetFramebufferSize(window, &width, &height);
 			const auto suitableWidth = std::clamp(static_cast<uint32_t>(width), surfaceCapabilities.minImageExtent.width, surfaceCapabilities.maxImageExtent.width);
 			const auto suitableHeight = std::clamp(static_cast<uint32_t>(height), surfaceCapabilities.minImageExtent.height, surfaceCapabilities.maxImageExtent.height);
-			const auto suitableExtent = vk::Extent2D{ suitableWidth, suitableHeight };
+			const auto suitableExtent = vk::Extent2D{suitableWidth, suitableHeight};
 			return suitableExtent;
 		}
 	}
 	[[nodiscard]] auto getSuitableQueueFamilies(const vk::PhysicalDevice& physicalDevice, const vk::SurfaceKHR& surface) noexcept
 	{
 		const auto queueFamiliesProperties = physicalDevice.getQueueFamilyProperties();
-		const auto queueFamiliesIndex = std::views::iota(0U, queueFamiliesProperties.size());
-		const auto isSuitable = [&](QueueFamilyIndex i)
-		{
-			const auto isGraphical = physicalDevice.getQueueFamilyProperties()[i].queueFlags & vk::QueueFlagBits::eGraphics;
-			const auto isCompute = physicalDevice.getQueueFamilyProperties()[i].queueFlags & vk::QueueFlagBits::eCompute;
-			const auto isSurfaceSupported = physicalDevice.getSurfaceSupportKHR(i, surface); // For presentation support
-			return isGraphical && isCompute && isSurfaceSupported;
-		};
-		const auto toQueueFamily = [](QueueFamilyIndex i)
-		{
-			return QueueFamily{i, {1.0f}}; // One queue of priority level 1
-		};
-		auto queueFamilies = queueFamiliesIndex | std::views::filter(isSuitable) | std::views::transform(toQueueFamily) | std::ranges::to<std::vector>();
+		auto queueFamilies = queueFamiliesProperties
+			| std::views::enumerate
+			| std::views::filter([&](const auto& indexedQueueFamilyProperties)
+			{
+				const auto& [queueFamilyIndex, queueFamilyProperties] = indexedQueueFamilyProperties;
+				const auto isGraphical = queueFamilyProperties.queueFlags & vk::QueueFlagBits::eGraphics;
+				const auto isCompute = queueFamilyProperties.queueFlags & vk::QueueFlagBits::eCompute;
+				const auto isSurfaceSupported = physicalDevice.getSurfaceSupportKHR(queueFamilyIndex, surface); // For presentation support
+				return isGraphical && isCompute && isSurfaceSupported;
+			})
+			| std::views::transform([](const auto& indexedQueueFamilyProperties)
+			{
+				const auto& [queueFamilyIndex, queueFamilyProperties] = indexedQueueFamilyProperties;
+				return QueueFamily{static_cast<QueueFamilyIndex>(queueFamilyIndex), {1.0f}}; // One queue of priority level 1
+			})
+			| std::ranges::to<std::vector>();
 		return queueFamilies;
 	}
 }
@@ -190,8 +188,8 @@ void VulkanApplication::run(const RunInfo& runInfo) noexcept // All exceptions a
 {
 	try
 	{
-		initWindow(runInfo.windowName); // Must be before initVulkan()
-		initVulkan(runInfo);
+		initWindow(runInfo); // Must be before initVulkan()
+		initVulkan();
 		// Application info only valid after initVulkan
 		const auto applicationInfo = ApplicationInfo{
 			window
@@ -207,9 +205,9 @@ void VulkanApplication::run(const RunInfo& runInfo) noexcept // All exceptions a
 			, commandBuffers.front()
 		};
 		runInfo.preRenderLoop(applicationInfo);
-		renderLoop(runInfo.recordRenderingCommands, applicationInfo, runInfo.imguiCommands, runInfo.windowName);
+		renderLoop(runInfo, applicationInfo);
 		runInfo.postRenderLoop(applicationInfo);
-		cleanUp(); // Can't put in the class' destructor due to potential exceptions
+		cleanUp(); // Can't put in the destructor due to potential exceptions
 	}
 	catch (const std::exception& except)
 	{
@@ -217,15 +215,16 @@ void VulkanApplication::run(const RunInfo& runInfo) noexcept // All exceptions a
 	}
 }
 
-void VulkanApplication::initWindow(std::string_view windowName = "MyWindow")
+void VulkanApplication::initWindow(const RunInfo& runInfo)
 {
-	if (glfwInit() != GLFW_TRUE) throw std::runtime_error{"Failed to initalize GLFW"};
+	if (glfwInit() != GLFW_TRUE) throw std::runtime_error{"Failed to initialize GLFW"};
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Do not create an OpenGL context
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-	window = glfwCreateWindow(WIDTH, HEIGHT, windowName.data(), nullptr, nullptr);
+	window = glfwCreateWindow(WIDTH, HEIGHT, runInfo.windowName.data(), nullptr, nullptr);
 	if (!window) throw std::runtime_error{"Can't create window"};
 }
-void VulkanApplication::initVulkan(const RunInfo& runInfo)
+
+void VulkanApplication::initVulkan()
 {
 	if (glfwVulkanSupported() != GLFW_TRUE) throw std::runtime_error{"Vulkan is not supported"};
 	initDispatcher();
@@ -262,14 +261,13 @@ void VulkanApplication::initInstance()
 		VK_MAKE_VERSION(1, 0, 0),
 		VK_API_VERSION_1_0
 	};
-	const auto instanceCreateInfo = vk::InstanceCreateInfo {
+	instance = vk::createInstance(vk::InstanceCreateInfo{
 		{},
 		&applicationInfo,
 		enabledLayersNameProxy,
 		enabledInstanceExtensionsNameProxy,
 		isValidationLayersEnabled ? &debugMessengerCreateInfo : nullptr // Extend create info with debug messenger
-	};
-	instance = vk::createInstance(instanceCreateInfo);
+	});
 }
 void VulkanApplication::initDebugMessenger()
 {
@@ -297,50 +295,36 @@ void VulkanApplication::initDevice()
 	const auto enabledDeviceExtensionsNameProxy = getNamesProxy(enabledDeviceExtensionsName);
 	const auto physicalDeviceFeatures = vk::PhysicalDeviceFeatures{};
 	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
-	const auto toQueueCreateInfo = [](const auto& queueFamily)
-	{
-		const auto& [queueFamilyIndex, queuePriorities] = queueFamily;
-		return vk::DeviceQueueCreateInfo{ {}, queueFamilyIndex, queuePriorities };
-	};
-	const auto queueCreateInfos = queueFamilies | std::views::transform(toQueueCreateInfo) | std::ranges::to<std::vector>();
-	const auto deviceCreateInfo = vk::DeviceCreateInfo{
+	const auto queueCreateInfos = queueFamilies
+		| std::views::transform([](const QueueFamily& queueFamily){return vk::DeviceQueueCreateInfo{{}, queueFamily.first, queueFamily.second};})
+		| std::ranges::to<std::vector>();
+	device = physicalDevice.createDevice(vk::DeviceCreateInfo{
 		{},
 		queueCreateInfos,
 		enabledLayersNameProxy,
 		enabledDeviceExtensionsNameProxy,
 		&physicalDeviceFeatures
-	};
-	device = physicalDevice.createDevice(deviceCreateInfo);
+	});
 }
 void VulkanApplication::initQueue()
 {
 	const auto queueFamilyIndex = 0; // TODO: Always pick the first queueFamilyIndex for now
-	const auto queueIndex = 0; // TODO: Always pick the first queue of type queueFamilyIndex for now
+	const auto queueIndex = 0;       // TODO: Always pick the first queue of type queueFamilyIndex for now
 	queue = device.getQueue(queueFamilyIndex, queueIndex);
 }
-
-//void VulkanApplication::initSwapChain(vk::ImageUsageFlagBits swapchainImageUsage)
 void VulkanApplication::initSwapChain()
 {
 	const auto surfaceAttributes = getSurfaceAttributes(surface, physicalDevice);
 	surfaceFormat = getSuitableSurfaceFormat(surfaceAttributes.formats);
-	// Check if the surface format supports the future usages
 	checkFormatFeatures(physicalDevice, surfaceFormat.format, vk::FormatFeatureFlagBits::eColorAttachment);
-	checkFormatFeatures(physicalDevice, surfaceFormat.format, vk::FormatFeatureFlagBits::eTransferDst);
-
+	checkFormatFeatures(physicalDevice, surfaceFormat.format, vk::FormatFeatureFlagBits::eTransferDst); // The application could use a compute shader to render to a target image and transfer the data over a swapchain image
 	surfaceExtent = getSuitableSurfaceExtent(window, surfaceAttributes.capabilities);
-
-	const auto presentMode = getSuitablePresentMode(surfaceAttributes.presentModes);
-
 	auto imageCount = surfaceAttributes.capabilities.minImageCount + 1;
 	if (surfaceAttributes.capabilities.maxImageCount != 0) // Not infinite
 	{
 		imageCount = std::min(imageCount, surfaceAttributes.capabilities.maxImageCount);
 	}
-
-	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
-
-	vk::SwapchainCreateInfoKHR createInfo{
+	swapchain = device.createSwapchainKHR(vk::SwapchainCreateInfoKHR{
 		{}
 		, surface
 		, imageCount
@@ -350,53 +334,41 @@ void VulkanApplication::initSwapChain()
 		, 1 // Single layer, no stereo-rendering
 		, vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst // Expected image usages to prevent from transitioning layout into conflicting types
 		, vk::SharingMode::eExclusive // Drawing and presentation are done with one physical device's queue
-		, queueFamilies.front().first
+		, getSuitableQueueFamilies(physicalDevice, surface).front().first
 		, surfaceAttributes.capabilities.currentTransform
 		, vk::CompositeAlphaFlagBitsKHR::eOpaque
-		, presentMode
+		, getSuitablePresentMode(surfaceAttributes.presentModes)
 		, VK_TRUE
 		, VK_NULL_HANDLE
-	};
-	swapchain = device.createSwapchainKHR(createInfo);
+	});
 }
 void VulkanApplication::initCommandPool()
 {
-	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
-	const auto commandPoolCreateInfo = vk::CommandPoolCreateInfo{
-		vk::CommandPoolCreateFlagBits::eResetCommandBuffer // reset and rerecord command buffer
-		, queueFamilies.front().first
-	};
-	commandPool = device.createCommandPool(commandPoolCreateInfo);
+	commandPool = device.createCommandPool(vk::CommandPoolCreateInfo{
+		vk::CommandPoolCreateFlagBits::eResetCommandBuffer // Reset and rerecord command buffer
+		, getSuitableQueueFamilies(physicalDevice, surface).front().first
+	});
 }
 void VulkanApplication::initCommandBuffer()
 {
-	const auto allocateInfo = vk::CommandBufferAllocateInfo{
+	commandBuffers = device.allocateCommandBuffers(vk::CommandBufferAllocateInfo{
 		commandPool
 		, vk::CommandBufferLevel::ePrimary
 		, 1
-	};
-	// Command buffers are allocated from the command pool
-	commandBuffers = device.allocateCommandBuffers(allocateInfo);
+	});
 }
 void VulkanApplication::initSyncObjects()
 {
-	const auto semCreateInfo = vk::SemaphoreCreateInfo{};
-	const auto fenceCreateInfo = vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled}; // First frame doesn't have to wait for the unexisted previous image
-	isAcquiredImageReadSemaphore = device.createSemaphore(semCreateInfo);
-	isImageRenderedSemaphore = device.createSemaphore(semCreateInfo);
-	isCommandBufferExecutedFence = device.createFence(fenceCreateInfo);
+	isAcquiredImageReadSemaphore = device.createSemaphore(vk::SemaphoreCreateInfo{});
+	isImageRenderedSemaphore = device.createSemaphore(vk::SemaphoreCreateInfo{});
+	isCommandBufferExecutedFence = device.createFence(vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled}); // First frame doesn't have to wait for the unexisted previous image
 }
-
-//TODO: Don't share imgui renderpass with application renderpass, do this first beforer attempt the below
-//TODO: Check if the runInfo already provdie a renderpass, grpahic pipeline, framebuffer,...?
 
 void VulkanApplication::initImGui()
 {
 	// https://github.com/ocornut/imgui/wiki
 	// https://github.com/epezent/implot
-	// imguizmo 
-	// Imgui is layered onto top of our window, see imgui_demo.cpp, example_glfw_vulkan.cpp, and imgui_impl_vulkan.cpp
-	// All the ImGui_ImplVulkanH_XXX structures/functions are optional helpers used by the demo
+	// https://github.com/CedricGuillemet/ImGuizmo
 
 	// Reserved for imgui
 	initImGuiDescriptorPool();
@@ -408,19 +380,11 @@ void VulkanApplication::initImGui()
 
 	// Setup Dear ImGui context
 	IMGUI_CHECKVERSION();
-	const auto imguiContext = ImGui::CreateContext();
-	ImGuiIO& io = ImGui::GetIO(); (void)io;
-	//io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-	//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-	//TODO: A variable to toggle imgui log messages
+	ImGui::CreateContext();
 
-	// Setup Dear ImGui style
-	ImGui::StyleColorsDark();
-	//ImGui::StyleColorsLight();
-
-	const auto surfaceCapabilities = physicalDevice.getSurfaceCapabilitiesKHR(surface);
 	// Setup Platform/Renderer backends
-	assertm(surfaceCapabilities.minImageCount >= 2, "Min image count for swapchain is not greater than or equal to 2");
+	const auto surfaceCapabilities = physicalDevice.getSurfaceCapabilitiesKHR(surface);
+	assertm(surfaceCapabilities.minImageCount >= 2, "Min image count for the swapchain is not greater than or equal to 2");
 	ImGui_ImplGlfw_InitForVulkan(window, true);
 	ImGui_ImplVulkan_InitInfo init_info = {}; // Used to create an imgui pipeline, done by ImGui_ImplVulkan_Init because imgui need to bring in its own vertex/fragment shader modules for the UI
 	init_info.Instance = instance;
@@ -470,36 +434,33 @@ void VulkanApplication::initImGuiImageViews()
 	const auto images = device.getSwapchainImagesKHR(swapchain);
 	const auto toImageView = [&](const vk::Image& image)
 	{
-		const auto imageViewCreateInfo = vk::ImageViewCreateInfo{
+		return device.createImageView(vk::ImageViewCreateInfo{
 			{}
 			, image
 			, vk::ImageViewType::e2D
 			, surfaceFormat.format
 			, {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity}
 			, {vk::ImageAspectFlagBits::eColor, 0u, 1u, 0u, 1u}
-		};
-		return device.createImageView(imageViewCreateInfo);
+		});
 	};
 	imguiSwapchainImageViews = images | std::views::transform(toImageView) | std::ranges::to<std::vector>();
 }
-// Load the image from the previous render command buffer, unless the render command buffer using the same render pass then we can clear it
-//********** This is expected from the previous command buffer but is undefined if we use the same renderpass
 void VulkanApplication::initImGuiRenderPass()
 {
 	const auto attachmentDescription = vk::AttachmentDescription{
 		{}
 		, surfaceFormat.format
 		, vk::SampleCountFlagBits::e1 // One sample, no multisampling
-		, vk::AttachmentLoadOp::eLoad // Load the image from the previous render command buffer, unless the render command buffer using the same render pass then we can clear it
+		, vk::AttachmentLoadOp::eLoad // Load the swapchain image rendered by the application
 		, vk::AttachmentStoreOp::eStore
 		, vk::AttachmentLoadOp::eDontCare
 		, vk::AttachmentStoreOp::eDontCare
-		, vk::ImageLayout::eColorAttachmentOptimal // Expected layout at the beginning of the renderpass, ********** This is expected from the previous command buffer but is undefined if we use the same renderpass
+		, vk::ImageLayout::eColorAttachmentOptimal // Expected layout at the beginning of the renderpass
 		, vk::ImageLayout::ePresentSrcKHR // Expected layout at the end of the renderpass, final layout for presentation
 	};
 	const auto attachmentReference = vk::AttachmentReference{
 		0U // In the array of attachmentDescriptions
-		, vk::ImageLayout::eColorAttachmentOptimal // Expected layout at the end of this subpass, will be automatically transitioned by the graphic subpass
+		, vk::ImageLayout::eColorAttachmentOptimal // Expected layout used by a subpass
 	};
 	const auto subpassDescription = vk::SubpassDescription{ // The index of this subpass among the subpass description is specified GraphicsPipelineCreateInfo
 		{}
@@ -526,35 +487,31 @@ void VulkanApplication::initImGuiFrameBuffer()
 {
 	const auto toFramebuffer = [&](const vk::ImageView& imageView)
 	{
-		const auto framebufferCreateInfo = vk::FramebufferCreateInfo{
+		return device.createFramebuffer(vk::FramebufferCreateInfo{
 			{}
 			, imguiRenderPass
 			, imageView // Attachments
 			, surfaceExtent.width
 			, surfaceExtent.height
 			, 1 // Single layer, not doing stereo-rendering
-		};
-		return device.createFramebuffer(framebufferCreateInfo);
+		});
 	};
 	imguiFramebuffers = imguiSwapchainImageViews | std::views::transform(toFramebuffer) | std::ranges::to<std::vector>();
 }
 void VulkanApplication::initImGuiCommandPool()
 {
-	const auto queueFamilies = getSuitableQueueFamilies(physicalDevice, surface);
-	const auto commandPoolCreateInfo = vk::CommandPoolCreateInfo{
+	imguiCommandPool = device.createCommandPool(vk::CommandPoolCreateInfo{
 		vk::CommandPoolCreateFlagBits::eResetCommandBuffer // reset and rerecord command buffer
-		, queueFamilies.front().first
-	};
-	imguiCommandPool = device.createCommandPool(commandPoolCreateInfo);
+		, getSuitableQueueFamilies(physicalDevice, surface).front().first
+	});
 }
 void VulkanApplication::initImGuiCommandBuffer()
 {
-	const auto allocateInfo = vk::CommandBufferAllocateInfo{
+	imguiCommandBuffers = device.allocateCommandBuffers(vk::CommandBufferAllocateInfo{
 		imguiCommandPool
 		, vk::CommandBufferLevel::ePrimary // TODO: Secondary for UI? so we don't have to sync between 2 primary? or do we still need to sync between a primary and a secondary?
 		, 1
-	};
-	imguiCommandBuffers = device.allocateCommandBuffers(allocateInfo);
+	});
 }
 void VulkanApplication::cleanupImGui()
 {
@@ -573,24 +530,26 @@ void VulkanApplication::cleanupImGui()
 	ImGui_ImplVulkan_Shutdown();
 }
 
-void VulkanApplication::renderLoop(const RenderFrameFunction& recordRenderingCommands, const ApplicationInfo& applicationInfo, const DelegateFunction& imguiCommands, std::string_view windowName = "MyWindow") // Always render in the order from the back to the front with respect to the viewport depth
-{
-	// Must have an event to prevent data race between the imgui command buffer and the application rendr ocmmand buufer if they read/write to a descriptor
-	const auto renderCommandBufferEvent = device.createEvent(vk::EventCreateInfo{vk::EventCreateFlagBits::eDeviceOnly});
+// Must have an event to prevent data race between the imgui command buffer and the application rendr ocmmand buufer if they read/write to a descriptor
+// TODO: Rebuild the swapchain if resizing
+// TODO: Inflight frames
+// Imgui is likely to share resource with the applicationss' commandbuffers commands, sync this imguiCommandbuffer and the application render commandbuffer
+// Render the application first then pass the image rendered via color attachment to the top of the imgui renderpass to render the imgui ui ontop of the image
+// Get the user inputs from imgui first then we will construct a frame with them
+//void VulkanApplication::renderLoop(const CallbackRenderFunction& recordRenderingCommands, const ApplicationInfo& applicationInfo, const CallbackImguiFunction& imguiCommands, std::string_view windowName = "MyWindow")
 
-	// TODO: Rebuild the swapchain if resizing
-	// TODO: Inflight frames
+// Always render in the order from the back to the front with respect to the viewport depth
+void VulkanApplication::renderLoop(const RunInfo& runInfo, const ApplicationInfo& applicationInfo)
+{
+	const auto syncApplicationAndImguiEvent = device.createEvent(vk::EventCreateInfo{vk::EventCreateFlagBits::eDeviceOnly});
 
 	while (!glfwWindowShouldClose(window))
 	{
-		glfwPollEvents(); // Pass this is imgui, see opengl implementation
-
+		// Pre submission
+		glfwPollEvents();
 		const auto preFrameRender = glfwGetTime();
 
-		ImGui_ImplVulkan_NewFrame();
-		ImGui_ImplGlfw_NewFrame();
-		ImGui::NewFrame();
-
+		// Waiting for the previous submitted command buffers to finish and get new frame index
 		const auto isFirstFrame = device.getFenceStatus(isCommandBufferExecutedFence) == vk::Result::eSuccess;
 		std::ignore = device.waitForFences(isCommandBufferExecutedFence, VK_TRUE, std::numeric_limits<uint64_t>::max()); // Avoid modifying the command buffer when it's in used by the device
 		device.resetFences(isCommandBufferExecutedFence);
@@ -598,52 +557,59 @@ void VulkanApplication::renderLoop(const RenderFrameFunction& recordRenderingCom
 		if (resultValue.result != vk::Result::eSuccess) throw std::runtime_error{"Failed to acquire the next image index."};
 		const auto imageIndex = resultValue.value;
 
-		///////////////////////
-		// TODO: keep vk::ImageUsageFlagBits::eColorAttachment as the default for swapchain images, make sure the application transfer back to this attachment in order for it to be used by imgui
-		///////////////////////
-		const auto commandBuffer = commandBuffers.front(); // rendercomandbuffer
-		commandBuffer.begin(vk::CommandBufferBeginInfo{});
-		recordRenderingCommands(applicationInfo, imageIndex, isFirstFrame); // renderrFrame = a function with command to be exeuted only?
-		commandBuffer.setEvent(renderCommandBufferEvent, vk::PipelineStageFlagBits::eComputeShader);
+		// Application rendering commands
+		const auto commandBuffer = commandBuffers.front();
+		device.resetCommandPool(commandPool);
+		commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+		runInfo.renderCommands(applicationInfo, imageIndex, isFirstFrame); // renderFrame = a function with command to be executed only?
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
+			// Swapchain image layout: transferDst -> colorAttachment, for UI imgui renderpass
+			vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+			, vk::AccessFlagBits::eNone
+			, vk::ImageLayout::eTransferDstOptimal
+			, vk::ImageLayout::eColorAttachmentOptimal
+			, VK_QUEUE_FAMILY_IGNORED
+			, VK_QUEUE_FAMILY_IGNORED
+			, device.getSwapchainImagesKHR(swapchain)[imageIndex]
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		});
+		commandBuffer.setEvent(syncApplicationAndImguiEvent, vk::PipelineStageFlagBits::eBottomOfPipe);
 		commandBuffer.end();
 
-		// Imgui is likely to share resource with the applicationss' commandbuffers commands, sync this imguiCommandbuffer and the application render commandbuffer
-		// Render the application first then pass the image rendered via color attachment to the top of the imgui renderpass to render the imgui ui ontop of the image
-
-		imguiCommands();
-
-        ImGui::Render(); // Get the user inputs from imgui first then we will construct a frame with them
-        ImDrawData* draw_data = ImGui::GetDrawData();
-		//FrameRender(wd, draw_data); ------------------------------------------
-		device.resetCommandPool(imguiCommandPool);
+		// ImGui rendering commands
+		ImGui_ImplVulkan_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
+		if (runInfo.imguiCommands.has_value()) runInfo.imguiCommands.value()();
+		ImGui::Render();
+		device.resetCommandPool(imguiCommandPool); // Reset the command buffers within this command pool, needed for the OneTimeSubmit flag
 		const auto imguiCommandBuffer = imguiCommandBuffers.front();
 		imguiCommandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
-		imguiCommandBuffer.waitEvents(renderCommandBufferEvent, vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTopOfPipe, {}, {}, {});
+		imguiCommandBuffer.waitEvents(syncApplicationAndImguiEvent, vk::PipelineStageFlagBits::eBottomOfPipe, vk::PipelineStageFlagBits::eTopOfPipe, {}, {}, {});
 		const auto clearValues = static_cast<vk::ClearValue>(color::black);
 		imguiCommandBuffer.beginRenderPass(vk::RenderPassBeginInfo{
-				imguiRenderPass
-				, imguiFramebuffers[imageIndex]
-				, vk::Rect2D{vk::Offset2D{0, 0}, vk::Extent2D{surfaceExtent.width, surfaceExtent.height}}
-				, clearValues // Doesn't matter because the imguiRenderPass load rather than clear the attachment. This is specifies in the attachmentDescription
-			}, vk::SubpassContents::eInline);
-		ImGui_ImplVulkan_RenderDrawData(draw_data, imguiCommandBuffer); // Record imgui primitives into command buffer via imgui pipeline
+			imguiRenderPass
+			, imguiFramebuffers[imageIndex]
+			, vk::Rect2D{vk::Offset2D{0, 0}, vk::Extent2D{surfaceExtent.width, surfaceExtent.height}}
+			, clearValues // Doesn't matter because the imguiRenderPass load rather than clear the attachment. This is specifies in the attachmentDescription
+		}, vk::SubpassContents::eInline);
+		ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), imguiCommandBuffer); // Record imgui primitives into command buffer via imgui pipeline
 		imguiCommandBuffer.endRenderPass();
 		imguiCommandBuffer.end();
 
+		// Submit
 		const auto waitStages = std::vector<vk::PipelineStageFlags>{
-			//vk::PipelineStageFlagBits::eComputeShader // Don't need this if we have the imgui renderpass after the compute shader
-			 vk::PipelineStageFlagBits::eColorAttachmentOutput // Imgui, doesn't need to be a seperate wait stage if the main app using renderpass
+			 vk::PipelineStageFlagBits::eColorAttachmentOutput // Wait for the imgui commands from the previous submission to finish
 		};
-		const auto commbufs = {commandBuffer, imguiCommandBuffer};
-		//const auto commbufs = {commandBuffer};
+		const auto submittedCommandBuffers = {commandBuffer, imguiCommandBuffer};
 		queue.submit(vk::SubmitInfo{
 			isAcquiredImageReadSemaphore // Wait for the image to be finished reading, then we will modify it via the commands in the commandBuffers
 			, waitStages 
-			, commbufs
-			, isImageRenderedSemaphore // Raise when finished executing the commands
-		}, isCommandBufferExecutedFence); // Raise when finished executing the commands
+			, submittedCommandBuffers
+			, isImageRenderedSemaphore // Raise when finished executing the commands (Sync with present queue)
+		}, isCommandBufferExecutedFence); // Raise when finished executing the commands (Sync with host)
 
-		//FramePresent(wd); ------------------------------------
+		// Present
 		const auto presentResult = queue.presentKHR(vk::PresentInfoKHR{
 			isImageRenderedSemaphore
 			, swapchain
@@ -651,14 +617,15 @@ void VulkanApplication::renderLoop(const RenderFrameFunction& recordRenderingCom
 		});
 		if (presentResult != vk::Result::eSuccess) throw std::runtime_error{"Failed to present image."};
 
+		// Post submission
 		const auto postFrameRender = glfwGetTime();
 		const auto frameRenderTime = postFrameRender - preFrameRender;
 		const auto framesPerSecond = static_cast<int>(std::round(1 / frameRenderTime));
-		glfwSetWindowTitle(window, (std::string{windowName} + " - FPS: " + std::to_string(framesPerSecond)).data());
+		glfwSetWindowTitle(window, (std::string{runInfo.windowName} + " - FPS: " + std::to_string(framesPerSecond)).data());
 	}
-	device.waitIdle(); // Wait for all the fences to be unsignaled before clean up
 
-	device.destroyEvent(renderCommandBufferEvent);
+	device.waitIdle(); // Wait for all the fences to be unsignaled before clean up
+	device.destroyEvent(syncApplicationAndImguiEvent);
 }
 
 void VulkanApplication::cleanUp() // Destroy the objects in reverse order of their creation order

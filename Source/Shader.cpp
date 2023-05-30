@@ -108,7 +108,7 @@ void validateShaders(std::unordered_map<std::string, Shader>& shaderMap)
 			}
 		}
 		const auto shaderFileName = file.path().filename().string();
-		// NOTE: Inserted for both compilable and uncompilable shaders
+		// NOTE: Inserted for both compliable and uncompilable shaders
 		shaderMap.insert({shaderFileName, Shader{shaderFileName}});
 	}
 }

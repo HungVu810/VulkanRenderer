@@ -7,6 +7,7 @@
 #include <iostream>
 #include <vector>
 #include <functional>
+#include <optional>
 
 #ifdef NDEBUG
 	const bool isValidationLayersEnabled = false;
@@ -14,46 +15,14 @@
 	const bool isValidationLayersEnabled = true;
 #endif
 
-// TODO: Mark constructor as explicit
-// TODO: If the application need to modifies this vulkan application, use this RunInfo struct to do so implicitly
+// Mark constructor as explicit
+// If the application need to modifies this Vulkan application, use this RunInfo struct to do so implicitly
 
 namespace
 {
 	using QueueFamilyIndex = uint32_t;
 	using QueuesPriorities = std::vector<float>;
 	using QueueFamily = std::pair<QueueFamilyIndex, QueuesPriorities>;
-
-	constexpr auto WIDTH = uint32_t{800}; // 800, 1280
-	constexpr auto HEIGHT = uint32_t{800}; // 800, 720
-	constexpr auto MAX_INFLIGHT_IMAGES = 1; // Ideal 2, the number of images being simutaneously processed by the CPU and the GPU
-
-	// Public helpers
-	[[nodiscard]] inline auto getQueueFamilyIndices(const std::vector<QueueFamily>& queueFamilies)
-	{
-		const auto toQueueFamilyIndex = [](const QueueFamily& queueFamily){return queueFamily.first;};
-		const auto queueFamiliesIndex = queueFamilies | std::views::transform(toQueueFamilyIndex) | std::ranges::to<std::vector>();
-		return queueFamiliesIndex;
-	}
-	[[nodiscard]] inline auto checkFormatFeatures(const vk::PhysicalDevice& physicalDevice, vk::Format format, vk::FormatFeatureFlagBits requestedFormatFeatures)
-	{
-		const auto supportedFormatFeatures = physicalDevice.getFormatProperties(format).optimalTilingFeatures;
-		const auto isSupported = supportedFormatFeatures & requestedFormatFeatures;
-		if (!isSupported) throw std::runtime_error{"Requested format features are not supported"};
-	}
-	inline void submitCommandBufferOnceSynced(const vk::Device& device, const vk::Queue& queue, const vk::CommandBuffer& commandBuffer, const std::function<void(const vk::CommandBuffer& commandBuffer)>& commands) // Synced means the host will wait on the device queue to finish it works
-	{
-		const auto waitFence = device.createFence(vk::FenceCreateInfo{});
-		commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
-		commands(commandBuffer);
-		commandBuffer.end();
-		queue.submit(vk::SubmitInfo{{}, {}, commandBuffer}, waitFence);
-		std::ignore = device.waitForFences(waitFence, VK_TRUE, std::numeric_limits<uint64_t>::max());
-		device.destroy(waitFence);
-	}
-	inline void checkVkResult(VkResult result) // For C-API
-	{
-		if (result != VK_SUCCESS) throw std::runtime_error{"Failed to init ImGUI."};
-	}
 }
 
 template <typename T>
@@ -81,7 +50,7 @@ struct ApplicationInfo
 	const vk::PhysicalDevice physicalDevice;
 	const vk::Device device;
 	const vk::Queue queue;
-	const std::vector<QueueFamily> queueFamilies; // getSuitableQueueFamilies(physicalDevice, surface);
+	const std::vector<QueueFamily> queueFamilies;
 	const vk::SwapchainKHR swapchain;
 	const vk::Format surfaceFormat;
 	const vk::Extent2D surfaceExtent;
@@ -90,11 +59,35 @@ struct ApplicationInfo
 
 namespace
 {
-	using ApplicationFunction = std::function<void(const ApplicationInfo&)>;
-	using RenderFrameFunction = std::function<void(const ApplicationInfo&, uint32_t imageIndex, bool isFirstFrame)>; // isFirstFrame is used for one-time-only command recordings
-	using DelegateFunction = std::function<void()>;
-	//using CallbackFunction = std::function<void(const ApplicationInfo&)>;
-	//using RecordingCallbackFunction = std::function<void(const ApplicationInfo&, uint32_t imageIndex, bool isFirstFrame)>; 
+	using CallbackFunction = std::function<void(const ApplicationInfo&)>;
+	using CallbackRenderFunction = std::function<void(const ApplicationInfo&, uint32_t imageIndex, bool isFirstFrame)>;
+	using CallbackImguiFunction = std::function<void()>;
+
+	constexpr auto WIDTH = uint32_t{800}; // 800, 1280
+	constexpr auto HEIGHT = uint32_t{800}; // 800, 720
+	constexpr auto MAX_INFLIGHT_IMAGES = 1; // Ideal 2, the number of images being simultaneously processed by the CPU and the GPU
+
+	// Public helpers
+	[[nodiscard]] inline auto checkFormatFeatures(const vk::PhysicalDevice& physicalDevice, vk::Format format, vk::FormatFeatureFlagBits requestedFormatFeatures)
+	{
+		const auto supportedFormatFeatures = physicalDevice.getFormatProperties(format).optimalTilingFeatures;
+		const auto isSupported = supportedFormatFeatures & requestedFormatFeatures;
+		if (!isSupported) throw std::runtime_error{"Requested format features are not supported"};
+	}
+	inline void submitCommandBufferOnceSynced(const vk::Device& device, const vk::Queue& queue, const vk::CommandBuffer& commandBuffer, const std::function<void(const vk::CommandBuffer& commandBuffer)>& commands) // Synced means the host will wait on the device queue to finish it works
+	{
+		const auto waitFence = device.createFence(vk::FenceCreateInfo{});
+		commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+		commands(commandBuffer);
+		commandBuffer.end();
+		queue.submit(vk::SubmitInfo{{}, {}, commandBuffer}, waitFence);
+		std::ignore = device.waitForFences(waitFence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+		device.destroy(waitFence);
+	}
+	inline void checkVkResult(VkResult result) // For C-API
+	{
+		if (result != VK_SUCCESS) throw std::runtime_error{"Failed to init ImGUI."};
+	}
 }
 
 struct RunInfo
@@ -102,29 +95,28 @@ struct RunInfo
 	RunInfo(
 		const std::vector<std::string>& extraInstanceExtensions_
 		, const std::vector<std::string>& extraDeviceExtensions_
-		, const ApplicationFunction& preRenderLoop_
-		, const RenderFrameFunction& renderFrame_
-		, const DelegateFunction& imguiCommands_
-		, const ApplicationFunction& postRenderLoop_
+		, const CallbackFunction& preRenderLoop_
+		, const CallbackRenderFunction& renderCommands_ 
+		, const std::optional<CallbackImguiFunction>& imguiCommands_
+		, const CallbackFunction& postRenderLoop_
 		, std::string_view windowName_ = "MyWindow"
 	) : extraInstanceExtensions{extraInstanceExtensions_}
 		, extraDeviceExtensions{extraDeviceExtensions_}
 		, preRenderLoop{preRenderLoop_}
-		, recordRenderingCommands{renderFrame_}
+		, renderCommands{renderCommands_}
 		, imguiCommands{imguiCommands_}
 		, postRenderLoop{postRenderLoop_}
 		, windowName{windowName_}
 	{}
 
+	// TODO: Change to span<string_view>?
 	const std::vector<std::string> extraInstanceExtensions;
 	const std::vector<std::string> extraDeviceExtensions;
-	const ApplicationFunction preRenderLoop; // For pipeline setup, framebuffer, layout transition, etc.
-	const RenderFrameFunction recordRenderingCommands; // Buffering recording and rendering for one frame
-	const DelegateFunction imguiCommands;
-	const ApplicationFunction postRenderLoop; // Cleanup of pipeline and resources created via preRenderLoop(). This is called before the actual cleanUp()
+	const CallbackFunction preRenderLoop; // For pipeline setup, framebuffer, layout transition, etc.
+	const CallbackRenderFunction renderCommands; // Record each frame's command buffer
+	const std::optional<CallbackImguiFunction> imguiCommands; // Imgui commands used for each frame. Just pass nullopt if the user doesn't want to use imgui
+	const CallbackFunction postRenderLoop; // Cleanup preRenderLoop()'s pipeline and resources created. This is called before the actual cleanUp()
 	const std::string_view windowName;
-	// TODO: Change to span<string_view>?
-	// TODO: Make class vulkan a struct so the other main application can interact with via their struct/class
 };
 
 class VulkanApplication
@@ -137,9 +129,9 @@ public:
 	void run(const RunInfo& runInfo) noexcept;
 
 private:
-	void initWindow(std::string_view windowName);
+	void initWindow(const RunInfo& runInfo);
 
-	void initVulkan(const RunInfo& runInfo);
+	void initVulkan();
 	void initDispatcher();
 	void initInstance();
 	void initDebugMessenger();
@@ -161,7 +153,8 @@ private:
 	void initImGuiCommandBuffer();
 	void cleanupImGui();
 
-	void renderLoop(const RenderFrameFunction& recordRenderingCommands, const ApplicationInfo& applicationInfo, const DelegateFunction& imguiCommands, std::string_view windowName);
+	//void renderLoop(const CallbackRenderFunction& recordRenderingCommands, const ApplicationInfo& applicationInfo, const CallbackImguiFunction& imguiCommands, std::string_view windowName);
+	void renderLoop(const RunInfo& runInfo, const ApplicationInfo& applicationInfo);
 
 	void cleanUp();
 
@@ -192,14 +185,13 @@ private:
 	vk::SurfaceFormatKHR surfaceFormat;
 	vk::Extent2D surfaceExtent;
 	vk::SwapchainKHR swapchain;
-	// RenderLoop synchronizatoin
+	// RenderLoop synchronization
 	vk::CommandPool commandPool;
 	std::vector<vk::CommandBuffer> commandBuffers;
 	vk::Semaphore isAcquiredImageReadSemaphore;
 	vk::Semaphore isImageRenderedSemaphore;
 	vk::Fence isCommandBufferExecutedFence;
 
-	// TODO: a macro 
 	vk::RenderPass imguiRenderPass;
 	std::vector<vk::ImageView> imguiSwapchainImageViews;
 	vk::DescriptorPool imguiDescriptorPool;
