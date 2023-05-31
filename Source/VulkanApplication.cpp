@@ -148,7 +148,8 @@ namespace
 }
 
 VulkanApplication::VulkanApplication()
-	: window{nullptr}
+	: applicationInfo{std::nullopt}
+	, window{nullptr}
 	, instance{}
 	, debugMessengerCreateInfo{
 		{}
@@ -190,8 +191,7 @@ void VulkanApplication::run(const RunInfo& runInfo) noexcept // All exceptions a
 	{
 		initWindow(runInfo); // Must be before initVulkan()
 		initVulkan();
-		// Application info only valid after initVulkan
-		const auto applicationInfo = ApplicationInfo{
+		applicationInfo = ApplicationInfo{
 			window
 			, instance
 			, surface
@@ -204,15 +204,22 @@ void VulkanApplication::run(const RunInfo& runInfo) noexcept // All exceptions a
 			, surfaceExtent
 			, commandBuffers.front()
 		};
-		runInfo.preRenderLoop(applicationInfo);
-		renderLoop(runInfo, applicationInfo);
-		runInfo.postRenderLoop(applicationInfo);
+		// Application info only valid after initVulkan
+		runInfo.preRenderLoop(applicationInfo.value());
+		renderLoop(runInfo, applicationInfo.value());
+		runInfo.postRenderLoop(applicationInfo.value());
 		cleanUp(); // Can't put in the destructor due to potential exceptions
 	}
 	catch (const std::exception& except)
 	{
 		std::cerr << tag::exception << except.what() << std::endl;
 	}
+}
+
+inline const ApplicationInfo& VulkanApplication::getApplicationInfo() const noexcept
+{
+	assertm(applicationInfo.has_value(), "Forgot to call run() for the current VulkanApplication");
+	return applicationInfo.value();
 }
 
 void VulkanApplication::initWindow(const RunInfo& runInfo)
@@ -530,6 +537,7 @@ void VulkanApplication::cleanupImGui()
 	ImGui_ImplVulkan_Shutdown();
 }
 
+
 // Must have an event to prevent data race between the imgui command buffer and the application rendr ocmmand buufer if they read/write to a descriptor
 // TODO: Rebuild the swapchain if resizing
 // TODO: Inflight frames
@@ -562,17 +570,6 @@ void VulkanApplication::renderLoop(const RunInfo& runInfo, const ApplicationInfo
 		device.resetCommandPool(commandPool);
 		commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 		runInfo.renderCommands(applicationInfo, imageIndex, isFirstFrame); // renderFrame = a function with command to be executed only?
-		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
-			// Swapchain image layout: transferDst -> colorAttachment, for UI imgui renderpass
-			vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
-			, vk::AccessFlagBits::eNone
-			, vk::ImageLayout::eTransferDstOptimal
-			, vk::ImageLayout::eColorAttachmentOptimal
-			, VK_QUEUE_FAMILY_IGNORED
-			, VK_QUEUE_FAMILY_IGNORED
-			, device.getSwapchainImagesKHR(swapchain)[imageIndex]
-			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-		});
 		commandBuffer.setEvent(syncApplicationAndImguiEvent, vk::PipelineStageFlagBits::eBottomOfPipe);
 		commandBuffer.end();
 

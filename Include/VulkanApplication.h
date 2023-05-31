@@ -44,17 +44,58 @@ struct SyncObjects
 };
 struct ApplicationInfo
 {
+	ApplicationInfo(
+		GLFWwindow* window_
+		, const vk::Instance& instance_
+		, const vk::SurfaceKHR& surface_
+		, const vk::PhysicalDevice& physicalDevice_
+		, const vk::Device& device_
+		, const vk::Queue& queue_
+		, const std::vector<QueueFamily>& queueFamilies_
+		, const vk::SwapchainKHR& swapchain_
+		, const vk::Format& surfaceFormat_
+		, const vk::Extent2D& surfaceExtent_
+		, const vk::CommandBuffer& commandBuffer_
+	) : window{window_}
+		, instance{instance_}
+		, surface{surface_}
+		, physicalDevice{physicalDevice_}
+		, device{device_}
+		, queue{queue_}
+		, queueFamilies{queueFamilies_}
+		, swapchain{swapchain_}
+		, surfaceFormat{surfaceFormat_}
+		, surfaceExtent{surfaceExtent_}
+		, commandBuffer{commandBuffer_}
+	{}
+
 	GLFWwindow* window;
-	const vk::Instance instance;
-	const vk::SurfaceKHR surface;
-	const vk::PhysicalDevice physicalDevice;
-	const vk::Device device;
-	const vk::Queue queue;
-	const std::vector<QueueFamily> queueFamilies;
-	const vk::SwapchainKHR swapchain;
-	const vk::Format surfaceFormat;
-	const vk::Extent2D surfaceExtent;
-	const vk::CommandBuffer commandBuffer;
+	vk::Instance instance;
+	vk::SurfaceKHR surface;
+	vk::PhysicalDevice physicalDevice;
+	vk::Device device;
+	vk::Queue queue;
+	std::vector<QueueFamily> queueFamilies;
+	vk::SwapchainKHR swapchain;
+	vk::Format surfaceFormat;
+	vk::Extent2D surfaceExtent;
+	vk::CommandBuffer commandBuffer;
+
+	ApplicationInfo& operator=(const ApplicationInfo& applicationInfo) noexcept
+	{
+		window = applicationInfo.window;
+		instance = applicationInfo.instance;
+		surface = applicationInfo.surface;
+		physicalDevice = applicationInfo.physicalDevice;
+		device = applicationInfo.device;
+		queue = applicationInfo.queue;
+		queueFamilies = applicationInfo.queueFamilies;
+		swapchain = applicationInfo.swapchain;
+		surfaceFormat = applicationInfo.surfaceFormat;
+		surfaceExtent = applicationInfo.surfaceExtent;
+		commandBuffer = applicationInfo.commandBuffer;
+		return *this;
+	}
 };
 
 namespace
@@ -90,6 +131,12 @@ namespace
 	}
 }
 
+/*
+	renderCommands must transition the final image layout to
+	colorAttachmentOptimal regardless of whether imgui is used or not since the
+	imgui renderpass will transition that image to presentSrcKHR from
+	colorAttachmentOptimal
+*/
 struct RunInfo
 {
 	RunInfo(
@@ -126,6 +173,8 @@ public:
 
 	~VulkanApplication() noexcept;
 
+	inline const ApplicationInfo& getApplicationInfo() const noexcept;
+
 	void run(const RunInfo& runInfo) noexcept;
 
 private:
@@ -153,7 +202,6 @@ private:
 	void initImGuiCommandBuffer();
 	void cleanupImGui();
 
-	//void renderLoop(const CallbackRenderFunction& recordRenderingCommands, const ApplicationInfo& applicationInfo, const CallbackImguiFunction& imguiCommands, std::string_view windowName);
 	void renderLoop(const RunInfo& runInfo, const ApplicationInfo& applicationInfo);
 
 	void cleanUp();
@@ -174,6 +222,7 @@ private:
 	}
 
 private:
+	std::optional<ApplicationInfo> applicationInfo;
 	GLFWwindow* window;
 	vk::Instance instance;
 	vk::DebugUtilsMessengerCreateInfoEXT debugMessengerCreateInfo;
@@ -192,6 +241,7 @@ private:
 	vk::Semaphore isImageRenderedSemaphore;
 	vk::Fence isCommandBufferExecutedFence;
 
+	// ImGui
 	vk::RenderPass imguiRenderPass;
 	std::vector<vk::ImageView> imguiSwapchainImageViews;
 	vk::DescriptorPool imguiDescriptorPool;
