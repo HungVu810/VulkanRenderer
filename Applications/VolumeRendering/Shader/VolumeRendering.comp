@@ -2,17 +2,13 @@
 
 layout (local_size_x = 10, local_size_y = 10, local_size_z = 1) in; // At least 1 for each local size
 
-layout(set = 0, binding = 0) uniform sampler3D volumnSampler; // Stores 3D intensities, [0, 1] * color white, not alpha
-
-layout(set = 0, binding = 2) uniform sampler1D transferSampler;
+layout(set = 0, binding = 0) uniform sampler3D volumnSampler; // A 3D voxel grid of intensities, [0, 1] grey scale S. Each intensity is a float but returned as (S, 0, 0, 0) when using texture() for lookup
 
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D raycastedImage;
 
+layout(set = 0, binding = 2) uniform sampler1D transferSampler; // A 1D color lookup table of rgba32. Used as a transfer function
 
-// layout() dynamic sampler1D transferFunciton; // a texture 256 pixels,
-
-struct ViewPyramid
-{
+struct ViewPyramid {
 	vec3 location; // Top of the pyramid (camera, the apex)
 	float height; // Length from the top to the base of the pyramid (image grid)
 	// Camera unit vectors
@@ -21,36 +17,32 @@ struct ViewPyramid
 	vec3 forward; // Looking direction
 };
 
-struct Ray
-{
+struct Ray {
 	vec3 origin;
 	vec3 direction;
 };
 
-struct HitInfo
-{
+struct HitInfo {
 	bool isHit;
 	float tMin, tMax; // Scale a ray's direction to the 2 hit locations, what if only one hit ?
 };
 
-struct Slab
-{
+struct Slab {
 	vec3 normal;
 	vec3 point;
 };
 
-float intersectSlab(Ray ray, Slab slab)
-{
+float intersectSlab(Ray ray, Slab slab) {
 	return dot(slab.normal, slab.point - ray.origin) / dot(slab.normal, ray.direction);
 }
 
-// volumeMin and volumeMax denotes 2 extremes of a volume. The volume must be an
-// axis-aligned bouding box since this function logic is based on these facts:
-// X slabs (volumeMin.x, volumeMax.x) has their normal (1, 0, 0).
-// Y slabs (volumeMin.y, volumeMax.y) has their normal (0, 1, 0).
-// Z slabs (volumeMin.z, volumeMax.z) has their normal (0, 0, -1) which goes into the screen.
-HitInfo intersect(Ray ray, vec3 volumeMin, vec3 volumeMax)
-{
+HitInfo intersect(Ray ray, vec3 volumeMin, vec3 volumeMax) {
+	// volumeMin and volumeMax denotes 2 extremes of a volume. The volume must be an
+	// axis-aligned bouding box since this function logic is based on these facts:
+	// X slabs (volumeMin.x, volumeMax.x) has their normal (1, 0, 0).
+	// Y slabs (volumeMin.y, volumeMax.y) has their normal (0, 1, 0).
+	// Z slabs (volumeMin.z, volumeMax.z) has their normal (0, 0, -1) which goes into the screen.
+
 	const Slab slabMinX = Slab(vec3(1, 0, 0), vec3(volumeMin.x, 0, 0));
 	const Slab slabMaxX = Slab(vec3(1, 0, 0), vec3(volumeMax.x, 0, 0));
 
@@ -88,30 +80,17 @@ HitInfo intersect(Ray ray, vec3 volumeMin, vec3 volumeMax)
 	// tMin > 0 && tMax > 0, tMin < tMax -> tMin and tMax can be used for sample the volume
 }
 
-// Fixed transfer fuction for testing
-// Transfer function from ImGUI
-// layout(set 0, binding = ...) uniform dynamic sampler4D volumnColor; f(intensity) = color
-// layout(set 0, binding = ...) uniform dynamic sampler2D volumnAlpha; f(intensity) = alpha
-vec3 toColor(float intensity) // intensity = [0, 1]
-{
-//	const float pi = acos(-1);
-//	float red = clamp(sin(intensity * 2.0 * pi), 0.0, 1.0);
-//	float green = clamp(sin((intensity - (1.0 / 4.0)) * 2.0 * pi), 0.0, 1.0);
-//	float blue = clamp(sin((intensity  - (1.0 / 2.0)) * 2.0 * pi), 0.0, 1.0);
-//	return vec3(red, green, blue);
-//
+vec3 lookupColor(float intensity) {
+	// intensity = [0, 1]
 	return texture(transferSampler, intensity).xyz;
 }
 
-float toAlpha(float intensity) // intensity = [0, 1]
-{
-	// return 1; // Uniform
-	// return intensity;
+float lookupAlpha(float intensity) {
+	// intensity = [0, 1]
 	return texture(transferSampler, intensity).w;
 }
 
-ViewPyramid initViewPyramid()
-{
+ViewPyramid initViewPyramid() {
 	const vec3 viewPyramidForward = vec3(0, 0, -1); // Negative z axis forward in global world basis
 	const vec3 viewPyramidUp = vec3(0, 1, 0);
 	const vec3 viewPyramidSide = cross(viewPyramidForward, viewPyramidUp);
@@ -151,8 +130,7 @@ ViewPyramid initViewPyramid()
 	return ViewPyramid(viewPyramidLocation, viewPyramidHeight, rotatedViewPyramidBasis[0].xyz, rotatedViewPyramidBasis[1].xyz,  rotatedViewPyramidBasis[2].xyz);
 }
 
-vec3 toWorldSpace(ivec2 pixelViewportLocation, ViewPyramid viewPyramid)
-{
+vec3 toWorldSpace(ivec2 pixelViewportLocation, ViewPyramid viewPyramid) {
 	// Pixel to world space
 	const vec2 imageDimension = imageSize(raycastedImage) - 1; // [0, W) x [0, H)
 	// Each vec represent a column
@@ -183,8 +161,7 @@ vec3 toWorldSpace(ivec2 pixelViewportLocation, ViewPyramid viewPyramid)
 	return pixelWorldLocation.xyz;
 }
 
-void main()
-{
+void main() {
 	// NOW: Orthographic projection, with the box dimension beside its depth equals to the image dimension
 	// TODO: Perspective projection, switchable with ortho
 
@@ -227,14 +204,14 @@ void main()
 			const vec3 directionTrueLength = (hitInfo.tMax - t * stepSize) * raycast.direction; // (hitInfo.tMax - t * stepSize): hitInfo.tMax -> hitInfo.tMin
 			const vec3 sampleLocation = vec3(raycast.origin + directionTrueLength);
 			const vec4 sampledIntensity = texture(volumnSampler, abs(sampleLocation - volumeOrigin));
-			const float intensity = sampledIntensity.x;
+			const float intensity = sampledIntensity.x; // (S, 0, 0, 0)
 			if (t == 0) // The back
 			{
-				pixelColor = toColor(intensity);
+				pixelColor = lookupColor(intensity);
 			}
 			else // Going to the front
 			{
-				pixelColor = toColor(intensity) + (1 - toAlpha(intensity)) * pixelColor;
+				pixelColor = lookupColor(intensity) + (1 - lookupAlpha(intensity)) * pixelColor;
 			}
 		}
 	}

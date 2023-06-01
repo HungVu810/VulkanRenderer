@@ -2,10 +2,15 @@
 #include "vulkan/vulkan.hpp" // Do not place this header above the VulkanApplication.h
 #include "Shader.h"
 #include "Allocation.h"
+#define IMGUI_DEFINE_MATH_OPERATORS
 #include "imgui.h"
+#include "imgui_impl_vulkan.h"
+#include "glm/mat4x4.hpp"
+#include "glm/gtx/transform.hpp"
 #include <thread> // In case of wanting more workers
 #include <cstdint> // Needed for uint32_t
 #include <limits> // Needed for std::numeric_limits
+#include <cmath>
 #include <fstream>
 #include <filesystem>
 #include <vector>
@@ -16,7 +21,31 @@
 namespace 
 {
 	// Application
+	struct ViewPyramid
+	{
+		ViewPyramid(
+			const glm::vec3& location_
+			, float height_
+			, const glm::vec3& side_
+			, const glm::vec3& up_
+			, const glm::vec3& forward_
+		) : location{location_}
+			, height{height_}
+			, side{side_}
+			, up{up_}
+			, forward{forward_}
+		{}
+
+		glm::vec3 location; // Top of the pyramid (camera, the apex)
+		float height; // Length from the top to the base of the pyramid (image grid)
+		// Camera orthonormal basis
+		glm::vec3 side;
+		glm::vec3 up;
+		glm::vec3 forward;
+	};
 	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
+	constexpr auto windowExtent = glm::u32vec2{1280, 720}; // (800, 800), (1280, 720)
+	const auto PI = std::acos(-1.0f);
 	constexpr auto NUM_SLIDES = 113; // Ratio is 1:1:2, 2 unit of depth
 	constexpr auto SLIDE_HEIGHT = 256;
 	constexpr auto SLIDE_WIDTH = 256;
@@ -25,13 +54,21 @@ namespace
 	// z-y-x order, contains all intensity values of each slide images. Tightly packed vector instead of array because NUM_INTENSITIES is large, occupy the heap instead
 	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // The actual data used for sampling
 	auto shaderMap = std::unordered_map<std::string, Shader>{};
-	vk::Image volumeImage; vk::DeviceMemory volumeImageMemory; vk::ImageView volumeImageView; vk::Buffer volumeImageStagingBuffer; vk::DeviceMemory volumeImageStagingBufferMemory;
-	vk::Image transferImage; vk::DeviceMemory transferImageMemory; vk::ImageView transferImageView; vk::Buffer transferImageStagingBuffer; vk::DeviceMemory transferImageStagingBufferMemory;
-	vk::Image raycastedImage; vk::DeviceMemory raycastedImageMemory; vk::ImageView raycastedImageView;
+	auto viewPyramid = ViewPyramid{
+		glm::vec3{0.0f, 0.0f, 0.0f}
+		, 0.0f
+		, glm::vec3{1.0f, 0.0f, 0.0f}
+		, glm::vec3{0.0f, 1.0f, 0.0f}
+		, glm::vec3{0.0f, 0.0f, -1.0f}
+	};
+	vk::Image volumeImage, transferImage, raycastedImage, presentedImguiImage;
+	vk::DeviceMemory volumeImageMemory, volumeImageStagingBufferMemory, transferImageMemory, transferImageStagingBufferMemory, raycastedImageMemory, presentedImguiImageMemory;
+	vk::ImageView volumeImageView, transferImageView, raycastedImageView, presentedImguiImageView;
+	vk::Buffer volumeImageStagingBuffer, transferImageStagingBuffer;
 	vk::Sampler sampler;
 	vk::DescriptorSetLayout descriptorSetLayout;
 	vk::DescriptorPool descriptorPool;
-	std::vector<vk::DescriptorSet> descriptorSets;
+	std::vector<vk::DescriptorSet> descriptorSets; vk::DescriptorSet imguiDescriptorSet;
 	vk::ShaderModule volumeShaderModule;
 	vk::PipelineLayout computePipelineLayout;
 	vk::Pipeline computePipeline;
@@ -42,12 +79,14 @@ namespace
 		ImVec2 position; // With respect to the histogram child window cursor, are always whole numbers
 		ImColor color; // With alpha
 	};
-	constexpr auto imguiWindowExtent = ImVec2{500, 500}; // The height/width of the histogram/color spectrum
+	constexpr auto imguiWindowExtent = ImVec2{500.0f, windowExtent.y}; // The height/width of the histogram/color spectrum
 	auto histogram = std::vector<float>(100); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
 	auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is relative to the histogram window cursor
 	// Num transfer pixel is equal to the width of the color spectrum
 	// Default color red when imgui histogram control points is empty
-	auto transferFunction = Resource{std::vector<glm::vec4>(imguiWindowExtent.x, glm::vec4{1.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
+	auto transferFunction = Resource{std::vector<glm::vec4>(imguiWindowExtent.x, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
+	auto horizontalAngle = 0.0f;
+	auto verticalAngle = 0.0f;
 
 	void loadVolumeData()
 	{
@@ -184,6 +223,26 @@ namespace
 			raycastedImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(raycastedImage), false);
 			device.bindImageMemory(raycastedImage, raycastedImageMemory, 0);
 		};
+		const auto setupRaycastedImageImguiDeviceMemory = [&]()
+		{
+			// Reserve device memory for the raycasted image
+			presentedImguiImage = device.createImage(vk::ImageCreateInfo{
+				{}
+				, vk::ImageType::e2D
+				, surfaceFormat
+				, vk::Extent3D{surfaceExtent, 1}
+				, 1 // The only mip level for this image
+				, 1 // Single layer, no stereo-rendering
+				, vk::SampleCountFlagBits::e1 // One sample, no multisampling
+				, vk::ImageTiling::eOptimal
+				, vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst //| vk::ImageUsageFlagBits::eTransientAttachment // Is sampled by ImGui shaders
+				, vk::SharingMode::eExclusive
+				, queueFamiliesIndex
+			});
+			presentedImguiImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(presentedImguiImage), false);
+			device.bindImageMemory(presentedImguiImage, presentedImguiImageMemory, 0);
+		};
+
 		const auto initDescriptorPool = [&]()
 		{
 			// Describe the size of each used descriptor type and the number of descriptor sets (To check against the association/create layout step)
@@ -243,7 +302,7 @@ namespace
 					, sampler
 				}
 			};
-			descriptorSetLayout = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{{}, layoutBindings});
+			descriptorSetLayout  = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{{}, layoutBindings});
 			descriptorSets = device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{descriptorPool, descriptorSetLayout});
 		};
 
@@ -262,6 +321,7 @@ namespace
 		setupVolumeImageDeviceMemory();
 		setupVolumeImageStagingBuffer();
 		setupRaycastedImageDeviceMemory();
+		setupRaycastedImageImguiDeviceMemory();
 
 		// Inits
 		initDescriptorPool();
@@ -289,6 +349,27 @@ namespace
 			, descriptorImageInfo
 		}, {});
 
+		raycastedImageView = device.createImageView(vk::ImageViewCreateInfo{
+			{}
+			, raycastedImage
+			, vk::ImageViewType::e2D
+			, surfaceFormat
+			, {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity}
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		});
+		descriptorImageInfo = vk::DescriptorImageInfo{
+			sampler
+			, raycastedImageView
+			, vk::ImageLayout::eGeneral // Expected layout of the storage descriptor
+		};
+		device.updateDescriptorSets(vk::WriteDescriptorSet{
+			descriptorSets.front()
+			, 1
+			, 0
+			, vk::DescriptorType::eStorageImage
+			, descriptorImageInfo
+		}, {});
+
 		transferImageView = device.createImageView(vk::ImageViewCreateInfo{
 			{}
 			, transferImage
@@ -312,26 +393,14 @@ namespace
 			, {}
 		}, {});
 
-		raycastedImageView = device.createImageView(vk::ImageViewCreateInfo{
+		presentedImguiImageView = device.createImageView(vk::ImageViewCreateInfo{
 			{}
-			, raycastedImage
+			, presentedImguiImage
 			, vk::ImageViewType::e2D
 			, surfaceFormat
 			, {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity}
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
-		descriptorImageInfo = vk::DescriptorImageInfo{
-			sampler
-			, raycastedImageView
-			, vk::ImageLayout::eGeneral // Expected layout of the storage descriptor
-		};
-		device.updateDescriptorSets(vk::WriteDescriptorSet{
-			descriptorSets.front()
-			, 1
-			, 0
-			, vk::DescriptorType::eStorageImage
-			, descriptorImageInfo
-		}, {});
 
 		// Compute pipeline
 		const auto volumeShaderBinaryData = getShaderBinaryData(shaderMap, "VolumeRendering.comp");
@@ -359,6 +428,11 @@ namespace
 		prepareHistogramVolumeData();
 		validateShaders(shaderMap);
 		initComputePipeline(applicationInfo);
+		// Create (via the imgui descriptor pool in the Vulkan application),
+		// and update the imgui descriptor set (used by the imgui fragment
+		// shader, as an input attachment) with the image view to display the
+		// rendered raycasted image
+		imguiDescriptorSet = ImGui_ImplVulkan_AddTexture(sampler, presentedImguiImageView, static_cast<VkImageLayout>(vk::ImageLayout::eShaderReadOnlyOptimal));
 		submitCommandBufferOnceSynced(device, queue, commandBuffer, [&](const vk::CommandBuffer& commandBuffer){
 			// Volume image layout: undefined -> transferDstOptimal, which is the expected layout when using the copy command
 			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, vk::ImageMemoryBarrier{
@@ -485,6 +559,17 @@ namespace
 		}});
 
 	}
+	// imgui 2 slider
+	// the height of the pyramid == the distance of the top of the pyramaid
+	// The location can't be modified, is implicitly modifed by the sliders
+	// vertical rotation around the vr
+	// horizontal rotation around the vr
+	auto getViewPyramid(){
+		//const auto pitch = glm::rotate(x * PI, glm::vec3{1.0f, 0.0f, 0.0f}); // Pitch
+		//const auto yaw = glm::rotate(y * PI, glm::vec3{0.0f, 1.0f, 0.0f}); // Yaw
+		//const auto roll = glm::rotate(z * PI, glm::vec3{0.0f, 0.0f, -1.0f}); // Roll
+	}
+	auto /*glm::mat4x4*/ getPixelTransform(){}
 	void renderCommands(const ApplicationInfo& applicationInfo, uint32_t imageIndex, bool isFirstFrame)
 	{
 		APPLICATION_INFO_BINDINGS
@@ -505,42 +590,88 @@ namespace
 		});
 
 		commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, computePipeline);
-		commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, computePipelineLayout, 0, descriptorSets, {}); // 3D volume data
+		commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, computePipelineLayout, 0, descriptorSets.front(), {});
 		const auto numInvocationPerX = 10; // Also put this number in the compute shader
 		const auto numInvocationPerY = 10; // Also put this number in the compute shader
-		assert((WIDTH % numInvocationPerX) == 0 && (HEIGHT % numInvocationPerY) == 0);
-		commandBuffer.dispatch(WIDTH / numInvocationPerX, HEIGHT / numInvocationPerY, 1); // NOTE: group size must be at least 1 for all x, y, z
+		assert((windowExtent.x % numInvocationPerX) == 0 && (windowExtent.y % numInvocationPerY) == 0);
+		commandBuffer.dispatch(windowExtent.x / numInvocationPerX, windowExtent.y / numInvocationPerY, 1); // NOTE: group size must be at least 1 for all x, y, z
 
-		const auto swapchainImage = device.getSwapchainImagesKHR(swapchain)[imageIndex];
+		//const auto swapchainImage = device.getSwapchainImagesKHR(swapchain)[imageIndex];
+		// TODO: what about the rendered image that imgui is going render ontop of ?
+		// we give to imgui as an input attachment via descriptor, should be visible to imgui's fragment shader
 
-		// Barrier to sync writing to raycasted image via compute shader and copy it to swapchain image
-		// Raycasted image layout: general -> transferSrc, before copy command
-		// Swapchain image layout: undefined -> transferDst, before copy command
-		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {
-			vk::ImageMemoryBarrier{
-				vk::AccessFlagBits::eShaderWrite // Compute shader writes to raycasted image, vk::AccessFlagBits::eShaderWrite, only use this when the shader write to the memory
-				, vk::AccessFlagBits::eTransferRead // Wait until raycasted image is finished written to then copy
-				, vk::ImageLayout::eGeneral
-				, vk::ImageLayout::eTransferSrcOptimal
-				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-				, raycastedImage
-				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-			}
-			, vk::ImageMemoryBarrier{
-				vk::AccessFlagBits::eNone
-				, vk::AccessFlagBits::eTransferWrite // Wait until raycasted image is finished written to then copy
-				, vk::ImageLayout::eUndefined // Default & discard the previous contents of the swapchainImage
-				, vk::ImageLayout::eTransferDstOptimal
-				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-				, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
-				, swapchainImage
-				, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
-			}
+		//// Barrier to sync writing to raycasted image via compute shader and copy it to swapchain image
+		//// Raycasted image layout: general -> transferSrc, before copy command
+		//// Swapchain image layout: undefined -> transferDst, before copy command
+		//commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, {
+		//	vk::ImageMemoryBarrier{
+		//		vk::AccessFlagBits::eShaderWrite // Compute shader writes to raycasted image, vk::AccessFlagBits::eShaderWrite, only use this when the shader write to the memory
+		//		, vk::AccessFlagBits::eTransferRead // Wait until raycasted image is finished written to then copy
+		//		, vk::ImageLayout::eGeneral
+		//		, vk::ImageLayout::eTransferSrcOptimal
+		//		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		//		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		//		, raycastedImage
+		//		, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		//	}
+		//	, vk::ImageMemoryBarrier{
+		//		vk::AccessFlagBits::eNone
+		//		, vk::AccessFlagBits::eTransferWrite // Wait until raycasted image is finished written to then copy
+		//		, vk::ImageLayout::eUndefined // Default & discard the previous contents of the swapchainImage
+		//		, vk::ImageLayout::eTransferDstOptimal
+		//		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		//		, VK_QUEUE_FAMILY_IGNORED // Same queue family, don't transfer the queue ownership
+		//		, swapchainImage
+		//		, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		//	}
+		//});
+
+		//// Copy data from the rendered raycasted image via the compute shader to the current swapchain image
+		//commandBuffer.copyImage(raycastedImage, vk::ImageLayout::eTransferSrcOptimal, swapchainImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageCopy{
+		//	vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
+		//	, {0, 0, 0}
+		//	, vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
+		//	, {0, 0, 0}
+		//	, vk::Extent3D{surfaceExtent, 1}
+		//});
+
+		// Swapchain image layout: transferDst -> colorAttachment, for UI imgui renderpass
+		//commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
+		//	vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+		//	, vk::AccessFlagBits::eNone
+		//	, vk::ImageLayout::eTransferDstOptimal
+		//	, vk::ImageLayout::eColorAttachmentOptimal
+		//	, VK_QUEUE_FAMILY_IGNORED
+		//	, VK_QUEUE_FAMILY_IGNORED
+		//	, device.getSwapchainImagesKHR(swapchain)[imageIndex]
+		//	, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+
+		// don't copy the raycasted image to the swapchain since we don't want to render it directly to the viewport but through an imgui window
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, vk::ImageMemoryBarrier{
+			vk::AccessFlagBits::eShaderWrite
+			, vk::AccessFlagBits::eTransferRead
+			, vk::ImageLayout::eGeneral
+			, vk::ImageLayout::eTransferSrcOptimal
+			, VK_QUEUE_FAMILY_IGNORED
+			, VK_QUEUE_FAMILY_IGNORED
+			, raycastedImage
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 
-		// Copy data from the rendered raycasted image via the compute shader to the current swapchain image
-		commandBuffer.copyImage(raycastedImage, vk::ImageLayout::eTransferSrcOptimal, swapchainImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageCopy{
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eBottomOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, vk::ImageMemoryBarrier{
+			vk::AccessFlagBits::eNone
+			, vk::AccessFlagBits::eTransferWrite
+			, vk::ImageLayout::eUndefined
+			, vk::ImageLayout::eTransferDstOptimal
+			, VK_QUEUE_FAMILY_IGNORED
+			, VK_QUEUE_FAMILY_IGNORED
+			, presentedImguiImage
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		});
+
+
+		// What about if we just pass the descriptor set with 3 descriptor to imgui?
+		commandBuffer.copyImage(raycastedImage, vk::ImageLayout::eTransferSrcOptimal, presentedImguiImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageCopy{
 			vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
 			, {0, 0, 0}
 			, vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
@@ -548,11 +679,24 @@ namespace
 			, vk::Extent3D{surfaceExtent, 1}
 		});
 
-		// Swapchain image layout: transferDst -> colorAttachment, for UI imgui renderpass
-		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
-			vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+		// just in case when used via ocmmands specified in imgui's command buffer?
+		// TODO: test disable this since we already have the event barrier? And because the pipeline barrier only work within a command buffer?
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
+			vk::AccessFlagBits::eTransferWrite
 			, vk::AccessFlagBits::eNone
 			, vk::ImageLayout::eTransferDstOptimal
+			, vk::ImageLayout::eShaderReadOnlyOptimal
+			, VK_QUEUE_FAMILY_IGNORED
+			, VK_QUEUE_FAMILY_IGNORED
+			, presentedImguiImage
+			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+		});
+
+		// Swapchain image layout: undefined -> colorAttachment, for UI imgui renderpass
+		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
+			vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite
+			, vk::AccessFlagBits::eNone // Discard previous content, the imgui renderpass will produce an image from its shader + the raycasted imgui descriptor
+			, vk::ImageLayout::eUndefined
 			, vk::ImageLayout::eColorAttachmentOptimal
 			, VK_QUEUE_FAMILY_IGNORED
 			, VK_QUEUE_FAMILY_IGNORED
@@ -794,9 +938,11 @@ namespace
 
 		ImGui::SetNextWindowPos(ImVec2{0, 0}, ImGuiCond_Always);
 		ImGui::SetNextWindowSize(imguiWindowExtent, ImGuiCond_Always);
-		if (ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
+		if (ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
 		{
 			//ImGui::SetCursorScreenPos(ImVec2{0, 0});
+			ImGui::SliderAngle("Rotate Horizontal", &horizontalAngle, -180.0f, 180.0f);
+			ImGui::SliderAngle("Rotate Vertical", &verticalAngle, -90.0f, 90.0f);
 
 			const auto backgroundColor = ImColor{0.5f, 0.5f, 0.5f, 0.5f};
 			childHistogramCommands(ImVec2{
@@ -809,6 +955,13 @@ namespace
 				, ImGui::GetContentRegionAvail().y
 			}, backgroundColor);
 
+			ImGui::SetNextWindowPos(ImVec2{imguiWindowExtent.x, 0}, ImGuiCond_Always); // Add one extra pixel
+			ImGui::SetNextWindowSize(ImVec2{windowExtent.x - imguiWindowExtent.x - 10, windowExtent.y}, ImGuiCond_Always);
+			if (ImGui::Begin("Rendered image", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse))
+			{
+				ImGui::Image(imguiDescriptorSet, ImGui::GetContentRegionAvail());
+				ImGui::End();
+			}
 		}
 		ImGui::End();
 	}
@@ -823,6 +976,11 @@ namespace
 		device.destroyDescriptorSetLayout(descriptorSetLayout);
 		device.destroySampler(sampler);
 		device.destroyDescriptorPool(descriptorPool);
+
+		ImGui_ImplVulkan_RemoveTexture(imguiDescriptorSet);
+		device.destroyImageView(presentedImguiImageView);
+		device.freeMemory(presentedImguiImageMemory);
+		device.destroyImage(presentedImguiImage);
 
 		device.destroyImageView(volumeImageView);
 		device.freeMemory(volumeImageMemory);
@@ -853,6 +1011,7 @@ int main()
 		, rootCommands
 		, postRenderLoop
 		, "Volume Rendering"
+		, windowExtent
 	};
 	application.run(runInfo);
 

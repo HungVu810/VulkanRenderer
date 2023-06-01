@@ -227,7 +227,7 @@ void VulkanApplication::initWindow(const RunInfo& runInfo)
 	if (glfwInit() != GLFW_TRUE) throw std::runtime_error{"Failed to initialize GLFW"};
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Do not create an OpenGL context
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-	window = glfwCreateWindow(WIDTH, HEIGHT, runInfo.windowName.data(), nullptr, nullptr);
+	window = glfwCreateWindow(runInfo.windowExtent.x, runInfo.windowExtent.y, runInfo.windowName.data(), nullptr, nullptr);
 	if (!window) throw std::runtime_error{"Can't create window"};
 }
 
@@ -462,7 +462,7 @@ void VulkanApplication::initImGuiRenderPass()
 		, vk::AttachmentStoreOp::eStore
 		, vk::AttachmentLoadOp::eDontCare
 		, vk::AttachmentStoreOp::eDontCare
-		, vk::ImageLayout::eColorAttachmentOptimal // Expected layout at the beginning of the renderpass
+		, vk::ImageLayout::eColorAttachmentOptimal // Expected layout at the beginning of the renderpass //, vk::ImageLayout::eShaderReadOnlyOptimal
 		, vk::ImageLayout::ePresentSrcKHR // Expected layout at the end of the renderpass, final layout for presentation
 	};
 	const auto attachmentReference = vk::AttachmentReference{

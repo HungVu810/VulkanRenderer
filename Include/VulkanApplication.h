@@ -4,6 +4,7 @@
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
 #include "Utilities.h"
+#include "glm/vec2.hpp"
 #include <iostream>
 #include <vector>
 #include <functional>
@@ -104,8 +105,6 @@ namespace
 	using CallbackRenderFunction = std::function<void(const ApplicationInfo&, uint32_t imageIndex, bool isFirstFrame)>;
 	using CallbackImguiFunction = std::function<void()>;
 
-	constexpr auto WIDTH = uint32_t{800}; // 800, 1280
-	constexpr auto HEIGHT = uint32_t{800}; // 800, 720
 	constexpr auto MAX_INFLIGHT_IMAGES = 1; // Ideal 2, the number of images being simultaneously processed by the CPU and the GPU
 
 	// Public helpers
@@ -147,6 +146,7 @@ struct RunInfo
 		, const std::optional<CallbackImguiFunction>& imguiCommands_
 		, const CallbackFunction& postRenderLoop_
 		, std::string_view windowName_ = "MyWindow"
+		, const glm::vec2& windowExtent_ = glm::vec2{800, 800}
 	) : extraInstanceExtensions{extraInstanceExtensions_}
 		, extraDeviceExtensions{extraDeviceExtensions_}
 		, preRenderLoop{preRenderLoop_}
@@ -154,6 +154,7 @@ struct RunInfo
 		, imguiCommands{imguiCommands_}
 		, postRenderLoop{postRenderLoop_}
 		, windowName{windowName_}
+		, windowExtent{windowExtent_}
 	{}
 
 	// TODO: Change to span<string_view>?
@@ -164,6 +165,7 @@ struct RunInfo
 	const std::optional<CallbackImguiFunction> imguiCommands; // Imgui commands used for each frame. Just pass nullopt if the user doesn't want to use imgui
 	const CallbackFunction postRenderLoop; // Cleanup preRenderLoop()'s pipeline and resources created. This is called before the actual cleanUp()
 	const std::string_view windowName;
+	const glm::vec2 windowExtent;
 };
 
 class VulkanApplication
