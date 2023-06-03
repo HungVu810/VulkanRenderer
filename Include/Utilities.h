@@ -38,6 +38,14 @@ namespace format
 	struct Half{}; // Half-float, 16bit, available in glm but has a placeholder for now.
 }
 
+namespace math
+{
+	// https://glm.g-truc.net/0.9.2/api/index.html
+	const auto PI = std::acos(-1.0f);
+	inline auto toRadian(float angle) {return angle * PI / 180.0;}
+	inline auto toAngle(float radian) {return radian * 180 / PI;}
+}
+
 template<typename T>
 constexpr auto toVulkanFormat()
 {

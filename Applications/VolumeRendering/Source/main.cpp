@@ -18,34 +18,38 @@
 
 #define APPLICATION_INFO_BINDINGS const auto& [window, instance, surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, commandBuffer] = applicationInfo;
 
+// constexpr, consteval
+// create a appThread class that takes works and assigned with enum of the current work
+// TODO: seperate this vuklan application into a framework to support different
+// type of graphic program, ie volumn rendering, normal mesh renderng
+// TODO: Split into multiple command buffer with 1 submission? Set event
+// If application want multiple command buffer, it should create its own beside the provided one via ApplicationInfo
+// TODO: port utilities function from os project over
+// bezier curve efor the control points
+// TODOD: imgui widgets for ray casting sample sizes, and controling the camera position
+// TODO: control 3 rgb lines instead of control ponts?
+// TODO: not all transferFunction .data is covered (ie, 489 out of 500, due to padding in the transfer window)
+// TODO: checkot imgui tips for using math on imvec
+//TODO: Don't share imgui renderpass with application renderpass, do this first beforer attempt the below
+//TODO: Check if the runInfo already provdie a renderpass, grpahic pipeline, framebuffer,...?
+//TODO: A variable to toggle imgui log messages
+// TODO: Create a struct RenderFrame in RunInfo that accept a recording function and an optional imgui commands function, will be check against the USE_IMGUI var
+// TODO: Remove isFirstFrame, this can be done in the preRenderLoop function
+// TODO: Avoid the computation if the controlPoints doesn't change
+// todo: totalPixels != imguiWindowExtents.width
+// TODO: Half windows for visualization, half window for imgui histogram
+//ImGuiIO& io = ImGui::GetIO(); (void)io;
+//io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+//// Setup Dear ImGui style
+//ImGui::StyleColorsDark();
+////ImGui::StyleColorsLight();
+// TODO: Reduce the number of pixel need to be rendered since we only use half of the glfw window
 namespace 
 {
-	// Application
-	struct ViewPyramid
-	{
-		ViewPyramid(
-			const glm::vec3& location_
-			, float height_
-			, const glm::vec3& side_
-			, const glm::vec3& up_
-			, const glm::vec3& forward_
-		) : location{location_}
-			, height{height_}
-			, side{side_}
-			, up{up_}
-			, forward{forward_}
-		{}
-
-		glm::vec3 location; // Top of the pyramid (camera, the apex)
-		float height; // Length from the top to the base of the pyramid (image grid)
-		// Camera orthonormal basis
-		glm::vec3 side;
-		glm::vec3 up;
-		glm::vec3 forward;
-	};
+	// Main application
 	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
 	constexpr auto windowExtent = glm::u32vec2{1280, 720}; // (800, 800), (1280, 720)
-	const auto PI = std::acos(-1.0f);
 	constexpr auto NUM_SLIDES = 113; // Ratio is 1:1:2, 2 unit of depth
 	constexpr auto SLIDE_HEIGHT = 256;
 	constexpr auto SLIDE_WIDTH = 256;
@@ -54,17 +58,10 @@ namespace
 	// z-y-x order, contains all intensity values of each slide images. Tightly packed vector instead of array because NUM_INTENSITIES is large, occupy the heap instead
 	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // The actual data used for sampling
 	auto shaderMap = std::unordered_map<std::string, Shader>{};
-	auto viewPyramid = ViewPyramid{
-		glm::vec3{0.0f, 0.0f, 0.0f}
-		, 0.0f
-		, glm::vec3{1.0f, 0.0f, 0.0f}
-		, glm::vec3{0.0f, 1.0f, 0.0f}
-		, glm::vec3{0.0f, 0.0f, -1.0f}
-	};
 	vk::Image volumeImage, transferImage, raycastedImage, presentedImguiImage;
-	vk::DeviceMemory volumeImageMemory, volumeImageStagingBufferMemory, transferImageMemory, transferImageStagingBufferMemory, raycastedImageMemory, presentedImguiImageMemory;
+	vk::Buffer volumeImageStagingBuffer, transferImageStagingBuffer, viewPyramidStructBuffer, pixelToWorldSpaceTransformBuffer;
+	vk::DeviceMemory volumeImageMemory, volumeImageStagingBufferMemory, transferImageMemory, transferImageStagingBufferMemory, raycastedImageMemory, presentedImguiImageMemory, viewPyramidStructBufferMemory, pixelToWorldSpaceTransformBufferMemory;
 	vk::ImageView volumeImageView, transferImageView, raycastedImageView, presentedImguiImageView;
-	vk::Buffer volumeImageStagingBuffer, transferImageStagingBuffer;
 	vk::Sampler sampler;
 	vk::DescriptorSetLayout descriptorSetLayout;
 	vk::DescriptorPool descriptorPool;
@@ -72,6 +69,30 @@ namespace
 	vk::ShaderModule volumeShaderModule;
 	vk::PipelineLayout computePipelineLayout;
 	vk::Pipeline computePipeline;
+
+	// Camera, contains the length from the top to the base of the pyramid
+	// (image grid). The translating location (top of the pyramid (camera, the
+	// apex)), and an local orthonormal basis. The type are all glm::vec4 to
+	// account the alignment via std140
+	struct ViewPyramid
+	{
+		glm::vec4 height; // First component stores the height
+		// Orthogonal basis
+		glm::vec4 location; // mat[3]
+		glm::vec4 side; // mat[0]
+		glm::vec4 up; // mat[1]
+		glm::vec4 forward; // mat[2]
+	};
+	auto viewPyramid = ViewPyramid{ // Keep as the default orientation, only modifed by setupViewPyramid() then readonly
+		.height      = glm::vec4{0}
+		, .location  = glm::vec4{0}
+		, .side      = glm::vec4{1, 0, 0, 0}
+		, .up        = glm::vec4{0, 1, 0, 0}
+		, .forward   = glm::vec4{0, 0, -1, 0}
+	};
+	constexpr auto volumeGridCenter = glm::vec4{0, 0, -0.5f, 0}; // Extent == [0, 1]^3. Do not modify.
+	auto horizontalRadian = 0.0f;
+	auto verticalRadian = 0.0f;
 
 	// ImGui
 	struct ControlPoint
@@ -82,11 +103,7 @@ namespace
 	constexpr auto imguiWindowExtent = ImVec2{500.0f, windowExtent.y}; // The height/width of the histogram/color spectrum
 	auto histogram = std::vector<float>(100); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
 	auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is relative to the histogram window cursor
-	// Num transfer pixel is equal to the width of the color spectrum
-	// Default color red when imgui histogram control points is empty
 	auto transferFunction = Resource{std::vector<glm::vec4>(imguiWindowExtent.x, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
-	auto horizontalAngle = 0.0f;
-	auto verticalAngle = 0.0f;
 
 	void loadVolumeData()
 	{
@@ -129,11 +146,33 @@ namespace
 		}
 		for (auto& count : histogram) count /= countMax; // Normalize the count so we use it for scaling later on
 	}
+	void setupViewPyramid()
+	{
+		// The corners are the side of the cube if the image suddenly has edge corners due to perespective projection when adjusting the viewPyramidLocation/viewPyramidHeight
+		// To rotate the viewPyramid forward, up and side 
+		// Because the volume dimension is 1, rotating radian need to be small to compensate
+		auto viewPyramidBasis = glm::mat4{
+			viewPyramid.side
+			, viewPyramid.up
+			, viewPyramid.forward
+			, glm::vec4{0, 0, 0, 1}
+		};
+		viewPyramidBasis =
+			glm::translate(glm::vec3{0, -5.0f, -0.5f}) // Translate to view the bottom of the volume grid, where the CT face is
+			* glm::rotate(glm::radians(90.0f), glm::vec3{1, 0, 0}) // Pitch up 90 degree
+			* viewPyramidBasis;
+		viewPyramid.height = glm::vec4{4.5f, 0, 0, 0};
+		viewPyramid.side = viewPyramidBasis[0];
+		viewPyramid.up = viewPyramidBasis[1];
+		viewPyramid.forward = viewPyramidBasis[2];
+		viewPyramid.location = viewPyramidBasis[3];
+	}
 	void initComputePipeline(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
 		const auto queueFamiliesIndex = std::views::elements<0>(queueFamilies) | std::ranges::to<std::vector>();
 		// Local functions
+		// TODO: inline all lambdas instead of sperating the definition and the usage
 		const auto setupTransferImageDeviceMemory = [&]()
 		{
 			// Reserve device memory for the transfer image
@@ -242,6 +281,34 @@ namespace
 			presentedImguiImageMemory = allocateMemory(device, physicalDevice, device.getImageMemoryRequirements(presentedImguiImage), false);
 			device.bindImageMemory(presentedImguiImage, presentedImguiImageMemory, 0);
 		};
+		const auto setupViewPyramidStructBuffer = [&]()
+		{
+			// Reserve device memory for staging buffer
+			viewPyramidStructBuffer = device.createBuffer(vk::BufferCreateInfo{
+				{}
+				, sizeof(ViewPyramid)
+				, vk::BufferUsageFlagBits::eUniformBuffer
+				, vk::SharingMode::eExclusive
+				, queueFamiliesIndex
+			});
+			const auto stagingBufferMemoryRequirement = device.getBufferMemoryRequirements(viewPyramidStructBuffer);
+			viewPyramidStructBufferMemory = allocateMemory(device, physicalDevice, stagingBufferMemoryRequirement, true);
+			device.bindBufferMemory(viewPyramidStructBuffer, viewPyramidStructBufferMemory, 0);
+		};
+		const auto setupPixelToWorldSpaceTransformBuffer = [&]()
+		{
+			// Reserve device memory for staging buffer
+			pixelToWorldSpaceTransformBuffer = device.createBuffer(vk::BufferCreateInfo{
+				{}
+				, sizeof(glm::mat4)
+				, vk::BufferUsageFlagBits::eUniformBuffer
+				, vk::SharingMode::eExclusive
+				, queueFamiliesIndex
+			});
+			const auto stagingBufferMemoryRequirement = device.getBufferMemoryRequirements(pixelToWorldSpaceTransformBuffer);
+			pixelToWorldSpaceTransformBufferMemory = allocateMemory(device, physicalDevice, stagingBufferMemoryRequirement, true);
+			device.bindBufferMemory(pixelToWorldSpaceTransformBuffer, pixelToWorldSpaceTransformBufferMemory, 0);
+		};
 
 		const auto initDescriptorPool = [&]()
 		{
@@ -249,6 +316,7 @@ namespace
 			const auto descriptorPoolSizes = std::vector<vk::DescriptorPoolSize>{
 				{vk::DescriptorType::eCombinedImageSampler, 2} // Volume image and transfer image
 				, {vk::DescriptorType::eStorageImage, 1} // Raycasted image
+				, {vk::DescriptorType::eUniformBuffer, 2} // View pyramid struct and transform matrix for pixel to world space
 			};
 			descriptorPool = device.createDescriptorPool(vk::DescriptorPoolCreateInfo{
 				{}
@@ -301,6 +369,20 @@ namespace
 					, vk::ShaderStageFlagBits::eCompute
 					, sampler
 				}
+				// View pyramid
+				, vk::DescriptorSetLayoutBinding{
+					3
+					, vk::DescriptorType::eUniformBuffer
+					, vk::ShaderStageFlagBits::eCompute
+					, sampler
+				}
+				// Pixel to world space
+				, vk::DescriptorSetLayoutBinding{
+					4
+					, vk::DescriptorType::eUniformBuffer
+					, vk::ShaderStageFlagBits::eCompute
+					, sampler
+				}
 			};
 			descriptorSetLayout  = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{{}, layoutBindings});
 			descriptorSets = device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{descriptorPool, descriptorSetLayout});
@@ -322,6 +404,8 @@ namespace
 		setupVolumeImageStagingBuffer();
 		setupRaycastedImageDeviceMemory();
 		setupRaycastedImageImguiDeviceMemory();
+		setupViewPyramidStructBuffer();
+		setupPixelToWorldSpaceTransformBuffer();
 
 		// Inits
 		initDescriptorPool();
@@ -402,6 +486,36 @@ namespace
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 
+		// ViewPyramidBuffer
+		auto descriptorBufferInfo = vk::DescriptorBufferInfo{
+			viewPyramidStructBuffer
+			, 0
+			, sizeof(ViewPyramid)
+		};
+		device.updateDescriptorSets(vk::WriteDescriptorSet{
+			descriptorSets.front()
+			, 3
+			, 0
+			, vk::DescriptorType::eUniformBuffer
+			, {}
+			, descriptorBufferInfo
+		}, {});
+
+		// PixelToWorldSpaceBuffer
+		descriptorBufferInfo = vk::DescriptorBufferInfo{
+			pixelToWorldSpaceTransformBuffer
+			, 0
+			, sizeof(glm::mat4)
+		};
+		device.updateDescriptorSets(vk::WriteDescriptorSet{
+			descriptorSets.front()
+			, 4
+			, 0
+			, vk::DescriptorType::eUniformBuffer
+			, {}
+			, descriptorBufferInfo
+		}, {});
+
 		// Compute pipeline
 		const auto volumeShaderBinaryData = getShaderBinaryData(shaderMap, "VolumeRendering.comp");
 		volumeShaderModule = device.createShaderModule(vk::ShaderModuleCreateInfo{{}, volumeShaderBinaryData});
@@ -427,6 +541,7 @@ namespace
 		loadVolumeData();
 		prepareHistogramVolumeData();
 		validateShaders(shaderMap);
+		setupViewPyramid();
 		initComputePipeline(applicationInfo);
 		// Create (via the imgui descriptor pool in the Vulkan application),
 		// and update the imgui descriptor set (used by the imgui fragment
@@ -559,22 +674,75 @@ namespace
 		}});
 
 	}
-	// imgui 2 slider
-	// the height of the pyramid == the distance of the top of the pyramaid
-	// The location can't be modified, is implicitly modifed by the sliders
-	// vertical rotation around the vr
-	// horizontal rotation around the vr
-	auto getViewPyramid(){
-		//const auto pitch = glm::rotate(x * PI, glm::vec3{1.0f, 0.0f, 0.0f}); // Pitch
-		//const auto yaw = glm::rotate(y * PI, glm::vec3{0.0f, 1.0f, 0.0f}); // Yaw
-		//const auto roll = glm::rotate(z * PI, glm::vec3{0.0f, 0.0f, -1.0f}); // Roll
+	void updatePixelToWorldSpaceTransform(const ApplicationInfo& applicationInfo)
+	{
+		APPLICATION_INFO_BINDINGS;
+
+		// The height of the viewPyramid doesn't change
+		auto viewPyramidBasis = glm::mat4{ // Make a copy of the viewPyramid, we will use the base bone made from the setupViewPyramid()
+			viewPyramid.side
+			, viewPyramid.up
+			, viewPyramid.forward
+			, glm::vec4{0, 0, 0, 1} // Location, is updated after this
+		};
+
+		// Construct a matrix encodes the rotated viewPyramid info and the rotated translation
+		// These rotations will rotate the viewPyramid on top of its default transform via setupViewPyramid()
+		//const auto verticalRotate = glm::rotate(glm::radians(-90.0f), glm::vec3{1, 0, 0}); // Pitch [-90, 90] 
+		const auto verticalRotate = glm::rotate(verticalRadian, glm::vec3{1, 0, 0}); // Pitch [-90, 90] 
+		const auto horizontalRotate = glm::rotate(horizontalRadian, glm::vec3{0, 0, 1}); // Roll [-180, 180]
+
+		viewPyramidBasis = horizontalRotate * verticalRotate * viewPyramidBasis;
+		const auto rotatedVolumeGridToCamera = horizontalRotate * verticalRotate * glm::vec4{static_cast<glm::vec3>(viewPyramid.location - volumeGridCenter), 1.0f};
+		viewPyramidBasis[3] = glm::vec4{static_cast<glm::vec3>(volumeGridCenter + rotatedVolumeGridToCamera), 1.0f};
+
+		const auto newViewPyramid = ViewPyramid{
+			viewPyramid.height
+			, viewPyramidBasis[3]
+			, viewPyramidBasis[0]
+			, viewPyramidBasis[1]
+			, viewPyramidBasis[2]
+		};
+		void* memory = device.mapMemory(viewPyramidStructBufferMemory, 0, device.getBufferMemoryRequirements(viewPyramidStructBuffer).size);
+		std::memcpy(memory, &newViewPyramid, sizeof(ViewPyramid));
+		device.unmapMemory(viewPyramidStructBufferMemory);
+
+		// Construct a pixelToWorldSpace transform using the matrix above
+		const auto normalizeComponents = glm::mat4{ // [0, W) x [0, H) -> [0, 1]^2, subtract 1 because index goes from [0, extent) exclusive
+			glm::vec4{1.0f / (surfaceExtent.width - 1.0f), 0, 0, 0}
+			, glm::vec4{0, 1.0f / (surfaceExtent.height - 1.0f), 0, 0}
+			, glm::vec4{0, 0, 1, 0}
+			, glm::vec4{0, 0, 0, 1}
+		};
+		const auto viewportToWorld = glm::mat4{ // [0, 1]^2 -> x : [0, 1], y : [0, -1]
+			glm::vec4{1, 0, 0, 0}
+			, glm::vec4{0, -1, 0, 0}
+			, glm::vec4{0, 0, 1, 0}
+			, glm::vec4{0, 0, 0, 1}
+		};
+		const auto translatePreRotate = glm::translate(glm::vec3{-0.5, 0.5, 0}); // Shift x by -0.5, y by 0.5 (image grid to the center of the XY basis), and z by 1 (out of the screen). Center the image grid in the world basis
+		const auto rotate = glm::mat4{ // Rotate to the direction based on the rotated view pyramid
+			viewPyramidBasis[0]
+			, viewPyramidBasis[1]
+			, viewPyramidBasis[2]
+			, glm::vec4{0, 0, 0, 1}
+		};
+		const auto translatePostRotate = glm::translate(glm::vec3(viewPyramidBasis[3]) + viewPyramid.height.x * glm::vec3{viewPyramidBasis[2]}); // Translate the pixel so that the image grid is centered with respect to the view pyramid
+		// proxyImageOrigin   = (-0.5, 0.5, 0.0)
+		// Image proxy width  = [-0.5, -0.5] = 1
+		// Image proxy height =  [0.5, -0.5] = 1
+		const auto pixelToWorldSpace = translatePostRotate * rotate * translatePreRotate * viewportToWorld * normalizeComponents;
+
+		memory = device.mapMemory(pixelToWorldSpaceTransformBufferMemory, 0, device.getBufferMemoryRequirements(pixelToWorldSpaceTransformBuffer).size);
+		std::memcpy(memory, &pixelToWorldSpace, sizeof(glm::mat4));
+		device.unmapMemory(pixelToWorldSpaceTransformBufferMemory);
 	}
-	auto /*glm::mat4x4*/ getPixelTransform(){}
 	void renderCommands(const ApplicationInfo& applicationInfo, uint32_t imageIndex, bool isFirstFrame)
 	{
 		APPLICATION_INFO_BINDINGS
 
 		updateTransferImage(applicationInfo);
+		updatePixelToWorldSpaceTransform(applicationInfo);
 
 		// Transition layout of the image descriptors before compute pipeline
 		// Raycasted image layout: undefined -> general, expected by the descriptor
@@ -646,7 +814,7 @@ namespace
 		//	, device.getSwapchainImagesKHR(swapchain)[imageIndex]
 		//	, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 
-		// don't copy the raycasted image to the swapchain since we don't want to render it directly to the viewport but through an imgui window
+		// Don't copy the raycasted image to the swapchain since we don't want to render it directly to the viewport but through an imgui window
 		commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, vk::ImageMemoryBarrier{
 			vk::AccessFlagBits::eShaderWrite
 			, vk::AccessFlagBits::eTransferRead
@@ -669,8 +837,6 @@ namespace
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		});
 
-
-		// What about if we just pass the descriptor set with 3 descriptor to imgui?
 		commandBuffer.copyImage(raycastedImage, vk::ImageLayout::eTransferSrcOptimal, presentedImguiImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageCopy{
 			vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1}
 			, {0, 0, 0}
@@ -685,7 +851,7 @@ namespace
 			vk::AccessFlagBits::eTransferWrite
 			, vk::AccessFlagBits::eNone
 			, vk::ImageLayout::eTransferDstOptimal
-			, vk::ImageLayout::eShaderReadOnlyOptimal
+			, vk::ImageLayout::eShaderReadOnlyOptimal // Expected layout as descriptor for imgui fragment shader
 			, VK_QUEUE_FAMILY_IGNORED
 			, VK_QUEUE_FAMILY_IGNORED
 			, presentedImguiImage
@@ -734,6 +900,7 @@ namespace
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, static_cast<ImVec4>(backgroundColor));
 		if (ImGui::BeginChild("Histogram Alpha", childExtent, true))
 		{
+			// TODO: if the extend is maxX, maxY. Must subtract it by 1 because index goes from [0, max) exclusive
 			//TODO: ImGui::GetWindowSize() after this instead of getChildExtent()?
 			const auto childWindowCursor = ImGui::GetCursorScreenPos(); // Must be placed above the visible button because we want the cursor of the current child window, not the button
 			const auto drawList = ImGui::GetWindowDrawList();
@@ -741,17 +908,16 @@ namespace
 			// Two default control points that aren't using the default control point color
 			if (controlPoints.empty())
 			{
-				// TODO: if the extend is maxX, maxY. Must subtract it by 1 because [0, max) exclusive
-				const auto leftMostControlPoint = unnormalizeCoordinate(ImVec2{0.0f, 0.5f}, childExtent);
+				const auto leftMostControlPoint = unnormalizeCoordinate(ImVec2{0.0f, 0.0f}, ImVec2{childExtent.x - 1, childExtent.y - 1});
 				controlPoints.push_back(ControlPoint{
 					leftMostControlPoint
-					, ImColor{1.0f, 0.0f, 0.0f, getAlpha(leftMostControlPoint, childExtent)
+					, ImColor{0.0f, 0.0f, 0.0f, getAlpha(leftMostControlPoint, childExtent)
 					}
 				});
-				const auto rightMostControlPoint = unnormalizeCoordinate(ImVec2{1.0f, 0.5f}, childExtent);
+				const auto rightMostControlPoint = unnormalizeCoordinate(ImVec2{1.0f, 1.0f}, ImVec2{childExtent.x - 1, childExtent.y - 1});
 				controlPoints.push_back(ControlPoint{
 					rightMostControlPoint
-					, ImColor{0.0f, 0.0f, 1.0f, getAlpha(rightMostControlPoint, childExtent)
+					, ImColor{1.0f, 1.0f, 1.0f, getAlpha(rightMostControlPoint, childExtent)
 					}
 				});
 			}
@@ -896,6 +1062,7 @@ namespace
 	}
 	void childColorSpectrumCommands(const ImVec2& childExtent, const ImColor& background)
 	{
+		// TODO: if the extend is maxX, maxY. Must subtract it by 1 because index goes from [0, max) exclusive
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0}); // Needed to avoid padding between the child window and the clip rect, tested with a visible button
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, static_cast<ImVec4>(background));  // Set a background color
 		if (ImGui::BeginChild("Color spectrum", childExtent, true, ImGuiWindowFlags_NoMove))
@@ -935,14 +1102,13 @@ namespace
 	{
 		//ImGui::ShowDemoWindow();
 		//const auto& io = ImGui::GetIO();
-
 		ImGui::SetNextWindowPos(ImVec2{0, 0}, ImGuiCond_Always);
 		ImGui::SetNextWindowSize(imguiWindowExtent, ImGuiCond_Always);
 		if (ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
 		{
 			//ImGui::SetCursorScreenPos(ImVec2{0, 0});
-			ImGui::SliderAngle("Rotate Horizontal", &horizontalAngle, -180.0f, 180.0f);
-			ImGui::SliderAngle("Rotate Vertical", &verticalAngle, -90.0f, 90.0f);
+			ImGui::SliderAngle("Rotate Horizontal", &horizontalRadian, -180.0f, 180.0f);
+			ImGui::SliderAngle("Rotate Vertical", &verticalRadian, -90.0f, 90.0f);
 
 			const auto backgroundColor = ImColor{0.5f, 0.5f, 0.5f, 0.5f};
 			childHistogramCommands(ImVec2{
@@ -956,7 +1122,8 @@ namespace
 			}, backgroundColor);
 
 			ImGui::SetNextWindowPos(ImVec2{imguiWindowExtent.x, 0}, ImGuiCond_Always); // Add one extra pixel
-			ImGui::SetNextWindowSize(ImVec2{windowExtent.x - imguiWindowExtent.x - 10, windowExtent.y}, ImGuiCond_Always);
+			ImGui::SetNextWindowSize(ImVec2{windowExtent.x - imguiWindowExtent.x, windowExtent.y}, ImGuiCond_Always);
+			// https://github.com/ocornut/imgui/wiki/Image-Loading-and-Displaying-Examples#Example-for-Vulkan-users
 			if (ImGui::Begin("Rendered image", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse))
 			{
 				ImGui::Image(imguiDescriptorSet, ImGui::GetContentRegionAvail());
@@ -997,6 +1164,12 @@ namespace
 		device.destroyImageView(raycastedImageView);
 		device.freeMemory(raycastedImageMemory);
 		device.destroyImage(raycastedImage);
+
+		device.freeMemory(viewPyramidStructBufferMemory);
+		device.destroyBuffer(viewPyramidStructBuffer);
+
+		device.freeMemory(pixelToWorldSpaceTransformBufferMemory);
+		device.destroyBuffer(pixelToWorldSpaceTransformBuffer);
 	}
 }
 

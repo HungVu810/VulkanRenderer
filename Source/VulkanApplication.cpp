@@ -537,7 +537,6 @@ void VulkanApplication::cleanupImGui()
 	ImGui_ImplVulkan_Shutdown();
 }
 
-
 // Must have an event to prevent data race between the imgui command buffer and the application rendr ocmmand buufer if they read/write to a descriptor
 // TODO: Rebuild the swapchain if resizing
 // TODO: Inflight frames
