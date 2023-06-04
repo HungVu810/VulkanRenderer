@@ -114,7 +114,7 @@ namespace
 			auto ctFile = std::ifstream{ctPath, std::ios_base::binary};
 			if (!ctFile) throw std::runtime_error{"Can't open file at " + ctPath.string()};
 
-			// Volume data is of type short, mentioned in the Standford document
+			// Volume data is of type short, mentioned in the Stanford document
 			for (auto intensity = uint16_t{0}; ctFile.read(reinterpret_cast<char*>(&intensity), sizeof(intensity)); dataIndex++)
 			{
 				// Swap byte order if running on little-endian system
@@ -674,7 +674,7 @@ namespace
 		}});
 
 	}
-	void updatePixelToWorldSpaceTransform(const ApplicationInfo& applicationInfo)
+	void updateShaderUniforms(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS;
 
@@ -742,7 +742,7 @@ namespace
 		APPLICATION_INFO_BINDINGS
 
 		updateTransferImage(applicationInfo);
-		updatePixelToWorldSpaceTransform(applicationInfo);
+		updateShaderUniforms(applicationInfo);
 
 		// Transition layout of the image descriptors before compute pipeline
 		// Raycasted image layout: undefined -> general, expected by the descriptor
@@ -1028,6 +1028,9 @@ namespace
 				const auto upperLeft = add(childWindowCursor, ImVec2{upperLeftExtentX, upperLeftExtentY});
 				const auto lowerRight = add(childWindowCursor, ImVec2{lowerRightExtentX, lowerRightExtentY});
 				drawList->AddRectFilled(upperLeft, lowerRight, ImColor{0.5f, 0.5f, 0.5f});
+
+				//if (i == 0) continue;
+				//drawList->AddLine()
 			}
 
 			// Draw any connection lines. Draw connection lines first then draw the control points to make the control points ontop of the lines
@@ -1107,6 +1110,10 @@ namespace
 		if (ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
 		{
 			//ImGui::SetCursorScreenPos(ImVec2{0, 0});
+			if (ImGui::Button("Reset", ImVec2{50, 20}))
+			{
+				controlPoints.clear();
+			}
 			ImGui::SliderAngle("Rotate Horizontal", &horizontalRadian, -180.0f, 180.0f);
 			ImGui::SliderAngle("Rotate Vertical", &verticalRadian, -90.0f, 90.0f);
 
