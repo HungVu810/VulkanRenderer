@@ -1110,9 +1110,12 @@ namespace
 		if (ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
 		{
 			//ImGui::SetCursorScreenPos(ImVec2{0, 0});
-			if (ImGui::Button("Reset", ImVec2{50, 20}))
+			if (ImGui::Button("Reset Control Points")) controlPoints.clear();
+			ImGui::SameLine();
+			if (ImGui::Button("Reset Rotations"))
 			{
-				controlPoints.clear();
+				horizontalRadian = 0.0f;
+				verticalRadian = 0.0f;
 			}
 			ImGui::SliderAngle("Rotate Horizontal", &horizontalRadian, -180.0f, 180.0f);
 			ImGui::SliderAngle("Rotate Vertical", &verticalRadian, -90.0f, 90.0f);
