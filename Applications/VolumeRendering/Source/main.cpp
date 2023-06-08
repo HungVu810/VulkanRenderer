@@ -18,33 +18,6 @@
 
 #define APPLICATION_INFO_BINDINGS const auto& [window, instance, surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, commandBuffer] = applicationInfo;
 
-// constexpr, consteval
-// create a appThread class that takes works and assigned with enum of the current work
-// TODO: seperate this vuklan application into a framework to support different
-// type of graphic program, ie volumn rendering, normal mesh renderng
-// TODO: Split into multiple command buffer with 1 submission? Set event
-// If application want multiple command buffer, it should create its own beside the provided one via ApplicationInfo
-// TODO: port utilities function from os project over
-// bezier curve efor the control points
-// TODOD: imgui widgets for ray casting sample sizes, and controling the camera position
-// TODO: control 3 rgb lines instead of control ponts?
-// TODO: not all transferFunction .data is covered (ie, 489 out of 500, due to padding in the transfer window)
-// TODO: checkot imgui tips for using math on imvec
-//TODO: Don't share imgui renderpass with application renderpass, do this first beforer attempt the below
-//TODO: Check if the runInfo already provdie a renderpass, grpahic pipeline, framebuffer,...?
-//TODO: A variable to toggle imgui log messages
-// TODO: Create a struct RenderFrame in RunInfo that accept a recording function and an optional imgui commands function, will be check against the USE_IMGUI var
-// TODO: Remove isFirstFrame, this can be done in the preRenderLoop function
-// TODO: Avoid the computation if the controlPoints doesn't change
-// todo: totalPixels != imguiWindowExtents.width
-// TODO: Half windows for visualization, half window for imgui histogram
-//ImGuiIO& io = ImGui::GetIO(); (void)io;
-//io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-//// Setup Dear ImGui style
-//ImGui::StyleColorsDark();
-////ImGui::StyleColorsLight();
-// TODO: Reduce the number of pixel need to be rendered since we only use half of the glfw window
 namespace 
 {
 	// Main application
@@ -1101,7 +1074,7 @@ namespace
 		ImGui::PopStyleColor();
 		ImGui::PopStyleVar();
 	}
-	void rootCommands()
+	void imguiCommands()
 	{
 		//ImGui::ShowDemoWindow();
 		//const auto& io = ImGui::GetIO();
@@ -1191,7 +1164,7 @@ int main()
 		, {}
 		, preRenderLoop
 		, renderCommands
-		, rootCommands
+		, imguiCommands
 		, postRenderLoop
 		, "Volume Rendering"
 		, windowExtent
@@ -1200,4 +1173,33 @@ int main()
 
 	return EXIT_SUCCESS;
 }
+// constexpr, consteval
+// create a appThread class that takes works and assigned with enum of the current work
+// TODO: seperate this vuklan application into a framework to support different
+// type of graphic program, ie volumn rendering, normal mesh renderng
+// TODO: Split into multiple command buffer with 1 submission? Set event
+// If application want multiple command buffer, it should create its own beside the provided one via ApplicationInfo
+// TODO: port utilities function from os project over
+// bezier curve efor the control points
+// TODOD: imgui widgets for ray casting sample sizes, and controling the camera position
+// TODO: control 3 rgb lines instead of control ponts?
+// TODO: not all transferFunction .data is covered (ie, 489 out of 500, due to padding in the transfer window)
+// TODO: checkot imgui tips for using math on imvec
+//TODO: Don't share imgui renderpass with application renderpass, do this first beforer attempt the below
+//TODO: Check if the runInfo already provdie a renderpass, grpahic pipeline, framebuffer,...?
+//TODO: A variable to toggle imgui log messages
+// TODO: Create a struct RenderFrame in RunInfo that accept a recording function and an optional imgui commands function, will be check against the USE_IMGUI var
+// TODO: Remove isFirstFrame, this can be done in the preRenderLoop function
+// TODO: Avoid the computation if the controlPoints doesn't change
+// todo: totalPixels != imguiWindowExtents.width
+// TODO: Half windows for visualization, half window for imgui histogram
+//ImGuiIO& io = ImGui::GetIO(); (void)io;
+//io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+//// Setup Dear ImGui style
+//ImGui::StyleColorsDark();
+////ImGui::StyleColorsLight();
+// TODO: Reduce the number of pixel need to be rendered since we only use half of the glfw window
+
+
 
