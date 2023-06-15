@@ -57,3 +57,10 @@ target_link_libraries(VolumeRendering PRIVATE
     cryptopp::cryptopp
     imgui::imgui)
 
+# Packaging for distribution, install NSIS http://nsis.sourceforge.net
+install(TARGETS VolumeRendering RUNTIME DESTINATION bin)
+# cpack_add_component(Applications DEPENDS glfw)
+# set license
+include(CPack)
+# include(InstallRequiredSystemLibraries) # Microsoft runtime libraries
+

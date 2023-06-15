@@ -18,6 +18,11 @@
 
 #define APPLICATION_INFO_BINDINGS const auto& [window, instance, surface, physicalDevice, device, queue, queueFamilies, swapchain, surfaceFormat, surfaceExtent, commandBuffer] = applicationInfo;
 
+//set(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+//set(SHADER_SOURCE "${PROJECT_ROOT}/Shader/")
+//set(SHADER_VALIDATOR "${PROJECT_ROOT}/Shader/Checksums.txt")
+//set(VOLUME_DATA "${PROJECT_ROOT}/Dependencies/VolumeData")
+
 namespace 
 {
 	// Main application
@@ -588,10 +593,11 @@ namespace
 			{
 				const auto interpolatedColor = add(controlPoints[i].color, scale(colorDirection, static_cast<float>(j) / totalPixels)); // Perform linear interpolation
 				transferFunction[controlPoints[i - 1].position.x + j] = glm::vec4{
-					interpolatedColor.x
-					, interpolatedColor.y
-					, interpolatedColor.z
-					, 1.0f - interpolatedColor.w // Interpolated color's w (alpha) goes to 0 means hitting the ceiling of the histogram window -> increasing alpha (= 1 - w)
+					interpolatedColor.x // r
+					, interpolatedColor.y // g
+					, interpolatedColor.z // b
+					, interpolatedColor.w // a
+					//, 1.0f - interpolatedColor.w // Interpolated color's w (alpha) goes to 0 means hitting the ceiling of the histogram window -> increasing alpha (= 1 - w)
 				};
 			}
 		}
@@ -1052,10 +1058,14 @@ namespace
 			for (size_t i = 1; i < controlPoints.size(); i++)
 			{
 				const auto upperLeftPosition = ImVec2{childWindowCursor.x + controlPoints[i - 1].position.x, childWindowCursor.y};
-				const auto leftColor = controlPoints[i - 1].color; // Including alpha
+				// const auto leftColor = controlPoints[i - 1].color; // Including alpha
+				auto leftColor = controlPoints[i - 1].color;
+				leftColor.Value.w = 1;
 
 				const auto lowerRightPosition = ImVec2{childWindowCursor.x + controlPoints[i].position.x, childWindowCursor.y + childExtent.y}; // Adding y of the child extent to reach to the floor of the current child window
-				const auto rightColor = controlPoints[i].color;  // Including alpha
+				// const auto rightColor = controlPoints[i].color;  // Including alpha
+				auto rightColor = controlPoints[i].color;
+				rightColor.Value.w = 1;
 
 				drawList->AddRectFilledMultiColor(
 					upperLeftPosition
@@ -1093,7 +1103,7 @@ namespace
 			ImGui::SliderAngle("Rotate Horizontal", &horizontalRadian, -180.0f, 180.0f);
 			ImGui::SliderAngle("Rotate Vertical", &verticalRadian, -90.0f, 90.0f);
 
-			const auto backgroundColor = ImColor{0.5f, 0.5f, 0.5f, 0.5f};
+			const auto backgroundColor = ImColor{0.5f, 0.5f, 0.5f, 0.3f};
 			childHistogramCommands(ImVec2{
 				ImGui::GetContentRegionAvail().x
 				, (11.0f / 12.0f * ImGui::GetContentRegionAvail().y)// - (ImGui::GetStyle().FramePadding.y / 2.0f) // Frame padding divided by 2 because we have 2 child windows
@@ -1164,7 +1174,7 @@ int main()
 		, {}
 		, preRenderLoop
 		, renderCommands
-		, imguiCommands
+		, imguiCommands // If uses std::nullopt, the application render to the default transfer function color table value which is black
 		, postRenderLoop
 		, "Volume Rendering"
 		, windowExtent

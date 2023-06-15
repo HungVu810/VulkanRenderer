@@ -35,6 +35,6 @@ add_subdirectory(Applications)
 # Set a startup project in Visual Studio IDE
 set_property(DIRECTORY ${SOLUTION_ROOT} PROPERTY VS_STARTUP_PROJECT VolumeRendering)
 
-
+# Packaging for distribution
 
 

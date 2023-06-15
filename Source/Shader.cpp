@@ -8,6 +8,22 @@
 #include "Utilities.h"
 #include "Shader.h"
 
+#ifndef SHADER_SOURCE
+#define SHADER_SOURCE "./Shader/Source" // Relative to the executable
+#endif // SHADER_SOURCE
+
+#ifndef SHADER_BINARY
+#define SHADER_BINARY "./Shader/Bin"
+#endif // SHADER_BINARY
+
+#ifndef SHADER_VALIDATOR
+#define SHADER_VALIDATOR "./Shader/Source/Checksum.txt"
+#endif // SHADER_VALIDATOR
+
+#ifndef SHADER_COMPILER
+#define SHADER_COMPILER "./Depenencies/VulkanSDK/Bin/glslc.exe"
+#endif // SHADER_COMPILER
+
 namespace
 {
 	[[nodiscard]] inline auto getShaderCompilerPath()
