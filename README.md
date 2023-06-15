@@ -4,6 +4,10 @@ This is an experimental rendering framework using Vulkan in which I implement so
 # Applications
 ## Volume Rendering
 Visualizer for CT-scanned cadaver head. ImGui is used for interacting with the volume grid via adding control points and rotations.
+### Build
+- Download vcpkg and install the following dependencies: glfw, glm, cryptopp, imgui
+- Make sure the compiler support C++23 latest features such as ranges::zip, enumerate
+- Build the VulkanApplication solution and build the VolumeRendering project
 ### Controls
 - Left mouse to add/move control points.
 - Right mouse to change a control point's color or delete a control point.
