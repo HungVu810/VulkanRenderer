@@ -8,10 +8,11 @@ Visualizer for CT-scanned cadaver head. ImGui is used for interacting with the v
 - Left mouse to add/move control points.
 - Right mouse to change a control point's color or delete a control point.
 ### Images
-![Screenshot 2023-06-04 172220](https://github.com/HungVu810/VulkanRenderer/assets/63895487/0ad4ba16-cbc3-42aa-a5c5-e4e132ddf3ad)
-![Screenshot 2023-06-04 173349](https://github.com/HungVu810/VulkanRenderer/assets/63895487/57330daf-4b89-408d-918f-31b65d1f7adc)
-![Screenshot 2023-06-04 175742](https://github.com/HungVu810/VulkanRenderer/assets/63895487/73e6c568-1346-41a1-a0da-795941dd02a1)
-![Screenshot 2023-06-03 222656](https://github.com/HungVu810/VulkanRenderer/assets/63895487/25958132-f4f5-4801-877a-9004dfb8b977)
+![Screenshot 2023-06-14 200216](https://github.com/HungVu810/VulkanRenderer/assets/63895487/2dec7041-a631-4adf-ad67-47ff2bccce4e)
+![Screenshot 2023-06-14 105236](https://github.com/HungVu810/VulkanRenderer/assets/63895487/b8097e88-49bb-468f-b2fa-2d1dbecb4348)
+![Screenshot 2023-06-14 200727](https://github.com/HungVu810/VulkanRenderer/assets/63895487/48e7760e-1c6f-4011-9d74-f83690bb8f80)
+![Screenshot 2023-06-14 200033](https://github.com/HungVu810/VulkanRenderer/assets/63895487/d02a9396-53d4-429d-b58d-691fe1a7d9ed)
+
 
 ## Triangle
 Displays a basic triangle used for testing the framework, is not functional at the moment because of reorganizations.
