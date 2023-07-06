@@ -29,6 +29,9 @@ file(GLOB COMMON_INCLUDES "${SOLUTION_ROOT}/Include/*")
 # Solution
 project(Vulkan)
 
+# Need to set these variable for Imgui's vcpkg dependencies
+set(Vulkan_LIBRARY "${VULKAN_SDK}/Lib/vulkan-1.lib")
+set(Vulkan_INCLUDE_DIR "${VULKAN_SDK}/Include")
 # Expand subdirectory
 add_subdirectory(Applications)
 

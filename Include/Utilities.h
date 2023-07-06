@@ -124,6 +124,31 @@ template<typename ComparedType>
 
 // TODO: make these funciton toGlmVec#(ImVec#), and toImVec#(GlmVec#) so we can use glm operations +,-... without the below?
 // ImGui
+[[nodiscard]] inline auto toVec2(const ImVec2& a)
+{
+	return glm::vec2{a.x, a.y};
+}
+[[nodiscard]] inline auto toVec3(const ImVec2& a, float z)
+{
+	return glm::vec3{a.x, a.y, z};
+}
+[[nodiscard]] inline auto toVec3(const ImVec4& a)
+{
+	return glm::vec3{a.x, a.y, a.z};
+}
+[[nodiscard]] inline auto toVec3(const ImColor& a)
+{
+	return glm::vec3{a.Value.x, a.Value.y, a.Value.z};
+}
+[[nodiscard]] inline auto toVec4(const ImVec4& a)
+{
+	return glm::vec4{a.x, a.y, a.z, a.w};
+}
+[[nodiscard]] inline auto toVec4(const ImColor& a)
+{
+	return glm::vec4{a.Value.x, a.Value.y, a.Value.z, a.Value.w};
+}
+
 [[nodiscard]] inline auto add(const ImVec2& a, const ImVec2& b)
 {
 	return ImVec2{a.x + b.x, a.y + b.y};

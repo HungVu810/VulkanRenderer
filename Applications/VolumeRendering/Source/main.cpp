@@ -28,11 +28,14 @@ namespace
 	// Main application
 	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
 	constexpr auto windowExtent = glm::u32vec2{1280, 720}; // (800, 800), (1280, 720)
+
 	constexpr auto NUM_SLIDES = 113; // Ratio is 1:1:2, 2 unit of depth
 	constexpr auto SLIDE_HEIGHT = 256;
 	constexpr auto SLIDE_WIDTH = 256;
 	constexpr auto NUM_INTENSITIES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
 	constexpr auto TOTAL_SCAN_BYTES = NUM_INTENSITIES * sizeof(Intensity);
+	// struct CtData{extent, byte scanned, type (always float because of sampler3D)}
+
 	// z-y-x order, contains all intensity values of each slide images. Tightly packed vector instead of array because NUM_INTENSITIES is large, occupy the heap instead
 	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // The actual data used for sampling
 	auto shaderMap = std::unordered_map<std::string, Shader>{};
@@ -61,6 +64,8 @@ namespace
 		glm::vec4 up; // mat[1]
 		glm::vec4 forward; // mat[2]
 	};
+	constexpr auto volumeGridCenter = glm::vec4{0, 0, -0.5f, 0}; // Extent == [0, 1]^3. Do not modify.
+	auto horizontalRadian = 0.0f;
 	auto viewPyramid = ViewPyramid{ // Keep as the default orientation, only modifed by setupViewPyramid() then readonly
 		.height      = glm::vec4{0}
 		, .location  = glm::vec4{0}
@@ -68,8 +73,6 @@ namespace
 		, .up        = glm::vec4{0, 1, 0, 0}
 		, .forward   = glm::vec4{0, 0, -1, 0}
 	};
-	constexpr auto volumeGridCenter = glm::vec4{0, 0, -0.5f, 0}; // Extent == [0, 1]^3. Do not modify.
-	auto horizontalRadian = 0.0f;
 	auto verticalRadian = 0.0f;
 
 	// ImGui
@@ -78,10 +81,9 @@ namespace
 		ImVec2 position; // With respect to the histogram child window cursor, are always whole numbers
 		ImColor color; // With alpha
 	};
-	constexpr auto imguiWindowExtent = ImVec2{500.0f, windowExtent.y}; // The height/width of the histogram/color spectrum
 	auto histogram = std::vector<float>(100); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
 	auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is relative to the histogram window cursor
-	auto transferFunction = Resource{std::vector<glm::vec4>(imguiWindowExtent.x, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
+	auto transferFunction = Resource{std::vector<glm::vec4>(256, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
 
 	void loadVolumeData()
 	{
@@ -584,21 +586,54 @@ namespace
 	void updateTransferFunction(const std::vector<ControlPoint>& controlPoints, std::vector<glm::vec4>& transferFunction)
 	{
 		if (controlPoints.empty()) return; // First frame, the 2 default control points aren't pushed yet. The transferFunction will have its elements assigned with glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}
-		for (const auto& [i, controlPoint] : std::views::enumerate(controlPoints))
+
+		const auto remappedControlPoints = controlPoints | std::views::transform([&](const ControlPoint& controlPoint){ // Remapped to 1D whose control point x value is in [0, transferFunction.size())
+			return ControlPoint{
+				ImVec2{
+					(controlPoint.position.x / controlPoints.back().position.x) * (transferFunction.size() - 1)
+					, 0.0f
+				}
+				, controlPoint.color
+			};
+		});
+		const auto colorControlPoints = remappedControlPoints | std::views::filter([](const ControlPoint& controlPoint){
+			return controlPoint.color.Value.x != -1.0f; // Only need to check R since G & B = -1 for dummy control points, filter out all dummy control points
+		}) | std::ranges::to<std::vector>();
+
+		// Set the colors to each pixels
+		for (const auto& [i, controlPoint] : std::views::enumerate(colorControlPoints))
 		{
 			if (i == 0) continue;
-			const auto colorDirection = subtract(controlPoints[i].color, controlPoints[i - 1].color); // Scaled color vector going from the previous' to this control point's color
-			const auto totalPixels = controlPoints[i].position.x - controlPoints[i - 1].position.x; // The number of pixels that will be assigned by this and the previous control points
-			for (const auto j : std::views::iota(0, totalPixels)) // Inclusive
+			//const auto colorDirection = subtract(controlPoints[i].color, controlPoints[i - 1].color); // Scaled color vector going from the previous' to this control point's color
+			//const auto totalPixels = controlPoints[i].position.x - controlPoints[i - 1].position.x + 1; // The number of pixels that will be assigned by this and the previous control points
+			const auto colorDirection = toVec3(colorControlPoints[i].color) - toVec3(colorControlPoints[i - 1].color);
+			const auto totalPixels = colorControlPoints[i].position.x - colorControlPoints[i - 1].position.x + 1;
+			for (const auto j : std::views::iota(0u, static_cast<uint32_t>(totalPixels))) // Exclusive
 			{
-				const auto interpolatedColor = add(controlPoints[i].color, scale(colorDirection, static_cast<float>(j) / totalPixels)); // Perform linear interpolation
-				transferFunction[controlPoints[i - 1].position.x + j] = glm::vec4{
+				// const auto interpolatedColor = add(controlPoints[i].color, scale(colorDirection, static_cast<float>(j) / totalPixels)); // Perform linear interpolation
+				const auto interpolatedColor = toVec3(colorControlPoints[i - 1].color) + colorDirection * (static_cast<float>(j) / (totalPixels - 1)); // Perform linear interpolation
+				transferFunction[colorControlPoints[i - 1].position.x + j] = glm::vec4{
 					interpolatedColor.x // r
 					, interpolatedColor.y // g
 					, interpolatedColor.z // b
-					, interpolatedColor.w // a
+					, 0.0f
+					//, interpolatedColor.w // a
 					//, 1.0f - interpolatedColor.w // Interpolated color's w (alpha) goes to 0 means hitting the ceiling of the histogram window -> increasing alpha (= 1 - w)
 				};
+			}
+		}
+
+		// Set the alphas to each pixel
+		for (const auto& [i, controlPoint] : std::views::enumerate(remappedControlPoints))
+		{
+			if (i == 0) continue;
+			const auto alphaDirection = remappedControlPoints[i].color.Value.w - remappedControlPoints[i - 1].color.Value.w;
+			const auto totalPixels = remappedControlPoints[i].position.x - remappedControlPoints[i - 1].position.x + 1;
+			for (const auto j : std::views::iota(0u, static_cast<uint32_t>(totalPixels))) // Exclusive
+			{
+				// const auto interpolatedColor = add(controlPoints[i].color, scale(colorDirection, static_cast<float>(j) / totalPixels)); // Perform linear interpolation
+				const auto interpolatedAlpha = remappedControlPoints[i - 1].color.Value.w + alphaDirection * (static_cast<float>(j) / (totalPixels - 1)); // Perform linear interpolation
+				transferFunction[remappedControlPoints[i - 1].position.x + j].w = interpolatedAlpha;
 			}
 		}
 	}
@@ -851,6 +886,7 @@ namespace
 	}
 
 	// ImGui, root & child windows
+	// Some dimension extent are subtracted by one because the index pixel goes from [0, Max)
 	void childHistogramCommands(const ImVec2& childExtent, const ImColor& backgroundColor)
 	{
 		// Statics
@@ -863,7 +899,7 @@ namespace
 		const auto getAlpha = [](const ImVec2& controlPointPosition, const ImVec2& childWindowExtent)
 		{
 			// The controlPointPosition is with respect to the child window cursor
-			return 1.0f - (controlPointPosition.y / childWindowExtent.y); // Control point's y = 0 (hit the child window's ceiling) means max opacity = 1
+			return 1.0f - (controlPointPosition.y / (childWindowExtent.y - 1)); // Control point's y = 0 (hit the child window's ceiling) means max opacity = 1
 		};
 		const auto getHitControlPoint = [&](const ImVec2& cursor, const float tolerance = 10.0f)
 		{
@@ -887,17 +923,15 @@ namespace
 			// Two default control points that aren't using the default control point color
 			if (controlPoints.empty())
 			{
-				const auto leftMostControlPoint = unnormalizeCoordinate(ImVec2{0.0f, 0.0f}, ImVec2{childExtent.x - 1, childExtent.y - 1});
+				const auto leftMostControlPoint = unnormalizeCoordinate(ImVec2{0.0f, 1.0f}, ImVec2{childExtent.x - 1, childExtent.y - 1});
 				controlPoints.push_back(ControlPoint{
 					leftMostControlPoint
-					, ImColor{0.0f, 0.0f, 0.0f, getAlpha(leftMostControlPoint, childExtent)
-					}
+					, ImColor{0.0f, 0.0f, 0.0f, getAlpha(leftMostControlPoint, childExtent)}
 				});
-				const auto rightMostControlPoint = unnormalizeCoordinate(ImVec2{1.0f, 1.0f}, ImVec2{childExtent.x - 1, childExtent.y - 1});
+				const auto rightMostControlPoint = unnormalizeCoordinate(ImVec2{1.0f, 0.0f}, ImVec2{childExtent.x - 1, childExtent.y - 1});
 				controlPoints.push_back(ControlPoint{
 					rightMostControlPoint
-					, ImColor{1.0f, 1.0f, 1.0f, getAlpha(rightMostControlPoint, childExtent)
-					}
+					, ImColor{1.0f, 1.0f, 1.0f, getAlpha(rightMostControlPoint, childExtent)}
 				});
 			}
 			assert(controlPoints.front().position.y >= 0 && controlPoints.back().position.y >= 0); // Sanity check
@@ -917,9 +951,12 @@ namespace
 						controlPoints.push_back(ControlPoint{
 							clickedPositionInChild
 							, ImColor{
-								defaultControlPointColor.Value.x
-								, defaultControlPointColor.Value.y
-								, defaultControlPointColor.Value.z
+								//defaultControlPointColor.Value.x
+								//, defaultControlPointColor.Value.y
+								//, defaultControlPointColor.Value.z
+								-1.0f // Default is just a new interpolated dummy to control the alpha between 2 endpoints
+								, -1.0f
+								, -1.0f
 								, getAlpha(clickedPositionInChild, childExtent)
 							}
 						});
@@ -971,7 +1008,7 @@ namespace
 			}
 
 			// Popups, need to be close to the outer loop to be invoked continuously to keep the popups stay opened
-			if (ImGui::BeginPopup("Input position capture", ImGuiWindowFlags_NoMove)) // The menu items are drawn above the push clip rect, we don't need to deferred it later than tthe clip rect drawing stage
+			if (ImGui::BeginPopup("Input position capture", ImGuiWindowFlags_NoMove)) // The menu items are drawn above the push clip rect, we don't need to deferred it later than the clip rect drawing stage
 			{
 				//if (ImGui::MenuItem("Change color", nullptr))
 				//{
@@ -979,7 +1016,7 @@ namespace
 				//}
 				// Casting the address of the color of the current hit control point to float[3]. Since ImColor is the same as float[4], it is valid to do this.
 				ImGui::ColorPicker3("###", (float*)&(hitControlPoint->color), ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha);
-				if (ImGui::MenuItem("Delete") )
+				if (ImGui::MenuItem("Delete"))
 				{
 					auto iterControlPoint = hitControlPoint;
 					//std::advance(iterControlPoint, hitControlPoint.value());
@@ -1018,22 +1055,34 @@ namespace
 				drawList->AddLine(
 					add(childWindowCursor, controlPoints[i - 1].position) // The control points are with respect to the child window cursor, we need to offset them to the ImGui screen position before using them
 					, add(childWindowCursor, controlPoints[i].position)
-					, ImColor{ 1.0f, 1.0f, 1.0f });
+					, ImColor{1.0f, 1.0f, 1.0f}
+				);
 			}
 
 			// Draw control points
-			for (int i = 0; i < controlPoints.size(); i++)
+			for (const auto& controlPoint : controlPoints)
 			{
-				drawList->AddCircleFilled(
-					add(childWindowCursor, controlPoints[i].position)
-					, controlPointRadius
-					, ImColor{
-						controlPoints[i].color.Value.x
-						, controlPoints[i].color.Value.y
-						, controlPoints[i].color.Value.z
-						, 1.0f // We want to see the color, the alpha of this color is implied by the position of the control point in the window and the color spectrum
-					}
-				, 0);
+				if (controlPoint.color.Value.x == -1.0f) // Dummy control point
+				{
+					drawList->AddCircle(
+						add(childWindowCursor, controlPoint.position)
+						, controlPointRadius
+						, ImColor{1.0f, 1.0f, 1.0f, 1.0f}
+						, 1.0f);
+				}
+				else
+				{
+					drawList->AddCircleFilled(
+						add(childWindowCursor, controlPoint.position)
+						, controlPointRadius
+						, ImColor{
+							controlPoint.color.Value.x
+							, controlPoint.color.Value.y
+							, controlPoint.color.Value.z
+							, 1.0f // We want to see the color, the alpha of this color is implied by the position of the control point in the window and the color spectrum
+						}
+						, 0);
+				}
 			}
 
 			drawList->PopClipRect();
@@ -1055,16 +1104,22 @@ namespace
 			// Draw each of the color spectrum rectangles per 2 control points
 			drawList->PushClipRect(childWindowCursor, add(childWindowCursor, childExtent));
 
-			for (size_t i = 1; i < controlPoints.size(); i++)
+			const auto colorControlPoints = controlPoints | std::views::filter([](const ControlPoint& controlPoint){
+				return controlPoint.color.Value.x != -1.0f; // Only need to check R since G & B = -1 for dummy control points, filter out all dummy control points
+			}) | std::ranges::to<std::vector>();
+
+			for (const auto& [i, controlPoint] : std::views::enumerate(colorControlPoints))
 			{
-				const auto upperLeftPosition = ImVec2{childWindowCursor.x + controlPoints[i - 1].position.x, childWindowCursor.y};
+				if (i == 0) continue;
+
+				const auto upperLeftPosition = ImVec2{childWindowCursor.x + colorControlPoints[i - 1].position.x, childWindowCursor.y};
 				// const auto leftColor = controlPoints[i - 1].color; // Including alpha
-				auto leftColor = controlPoints[i - 1].color;
+				auto leftColor = colorControlPoints[i - 1].color;
 				leftColor.Value.w = 1;
 
-				const auto lowerRightPosition = ImVec2{childWindowCursor.x + controlPoints[i].position.x, childWindowCursor.y + childExtent.y}; // Adding y of the child extent to reach to the floor of the current child window
+				const auto lowerRightPosition = ImVec2{childWindowCursor.x + colorControlPoints[i].position.x, childWindowCursor.y + childExtent.y}; // Adding y of the child extent to reach to the floor of the current child window
 				// const auto rightColor = controlPoints[i].color;  // Including alpha
-				auto rightColor = controlPoints[i].color;
+				auto rightColor = colorControlPoints[i].color;
 				rightColor.Value.w = 1;
 
 				drawList->AddRectFilledMultiColor(
@@ -1078,7 +1133,6 @@ namespace
 			}
 
 			drawList->PopClipRect();
-
 		}
 		ImGui::EndChild();
 		ImGui::PopStyleColor();
@@ -1089,7 +1143,7 @@ namespace
 		//ImGui::ShowDemoWindow();
 		//const auto& io = ImGui::GetIO();
 		ImGui::SetNextWindowPos(ImVec2{0, 0}, ImGuiCond_Always);
-		ImGui::SetNextWindowSize(imguiWindowExtent, ImGuiCond_Always);
+		ImGui::SetNextWindowSize(ImVec2{500.0f, windowExtent.y}, ImGuiCond_Always);
 		if (ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
 		{
 			//ImGui::SetCursorScreenPos(ImVec2{0, 0});
@@ -1114,8 +1168,10 @@ namespace
 				, ImGui::GetContentRegionAvail().y
 			}, backgroundColor);
 
-			ImGui::SetNextWindowPos(ImVec2{imguiWindowExtent.x, 0}, ImGuiCond_Always); // Add one extra pixel
-			ImGui::SetNextWindowSize(ImVec2{windowExtent.x - imguiWindowExtent.x, windowExtent.y}, ImGuiCond_Always);
+			// Rendered image window
+			const auto widgetWindowWidth = ImGui::GetWindowSize().x; // TODO: Check if equal 500.0f
+			ImGui::SetNextWindowPos(ImVec2{widgetWindowWidth, 0}, ImGuiCond_Always); // Place the rendered window to the right
+			ImGui::SetNextWindowSize(ImVec2{windowExtent.x - widgetWindowWidth, windowExtent.y}, ImGuiCond_Always);
 			// https://github.com/ocornut/imgui/wiki/Image-Loading-and-Displaying-Examples#Example-for-Vulkan-users
 			if (ImGui::Begin("Rendered image", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse))
 			{
