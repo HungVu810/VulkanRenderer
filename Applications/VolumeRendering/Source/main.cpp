@@ -79,10 +79,14 @@ namespace
 	struct ControlPoint
 	{
 		ImVec2 position; // With respect to the histogram child window cursor, are always whole numbers
-		ImColor color; // With alpha
+		float intensity;
 	};
-	auto histogram = std::vector<float>(100); // For imgui representation of the intensities histogram. The size of the histogram is the number of samples.
-	auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is relative to the histogram window cursor
+	// auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is relative to the histogram window cursor
+	//using ControlPoint = ImVec2;
+	using ControlGraph = std::vector<ControlPoint>;
+	auto areControlGraphsInitialized = false; // First frame, the 2 default control points for each control graphs aren't pushed yet. The transferFunction will have its elements assigned with glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}
+	auto controlGraphs = std::vector<ControlGraph>(4); // RGBA
+	auto histogram = std::vector<float>(100); // For ImGui representation of the intensities histogram. The size of the histogram is the number of samples.
 	auto transferFunction = Resource{std::vector<glm::vec4>(256, glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}), toVulkanFormat<glm::vec4>()}; // The width of imgui window contains the number of pixel for the transfer function
 
 	void loadVolumeData()
@@ -107,7 +111,7 @@ namespace
 		// Normalize the data to [0, 1]
 		const auto iterMax = std::ranges::max_element(intensities.data);
 		const auto maxIntensity = *iterMax;
-		const auto normalize = [&](Intensity& intensity){ return intensity /= maxIntensity; };
+		const auto normalize = [&](Intensity& intensity){return intensity /= maxIntensity;};
 		std::ranges::for_each(intensities.data, normalize);
 	}
 	void prepareHistogramVolumeData()
@@ -583,65 +587,55 @@ namespace
 		});
 	}
 
-	void updateTransferFunction(const std::vector<ControlPoint>& controlPoints, std::vector<glm::vec4>& transferFunction)
+	void updateTransferFunction()
 	{
-		if (controlPoints.empty()) return; // First frame, the 2 default control points aren't pushed yet. The transferFunction will have its elements assigned with glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}
+		if (!areControlGraphsInitialized) return; 
 
-		const auto remappedControlPoints = controlPoints | std::views::transform([&](const ControlPoint& controlPoint){ // Remapped to 1D whose control point x value is in [0, transferFunction.size())
-			return ControlPoint{
-				ImVec2{
-					(controlPoint.position.x / controlPoints.back().position.x) * (transferFunction.size() - 1)
-					, 0.0f
-				}
-				, controlPoint.color
-			};
-		});
-		const auto colorControlPoints = remappedControlPoints | std::views::filter([](const ControlPoint& controlPoint){
-			return controlPoint.color.Value.x != -1.0f; // Only need to check R since G & B = -1 for dummy control points, filter out all dummy control points
-		}) | std::ranges::to<std::vector>();
-
-		// Set the colors to each pixels
-		for (const auto& [i, controlPoint] : std::views::enumerate(colorControlPoints))
+		for (int i = 0; const auto& controlGraph : controlGraphs)
 		{
-			if (i == 0) continue;
-			//const auto colorDirection = subtract(controlPoints[i].color, controlPoints[i - 1].color); // Scaled color vector going from the previous' to this control point's color
-			//const auto totalPixels = controlPoints[i].position.x - controlPoints[i - 1].position.x + 1; // The number of pixels that will be assigned by this and the previous control points
-			const auto colorDirection = toVec3(colorControlPoints[i].color) - toVec3(colorControlPoints[i - 1].color);
-			const auto totalPixels = colorControlPoints[i].position.x - colorControlPoints[i - 1].position.x + 1;
-			for (const auto j : std::views::iota(0u, static_cast<uint32_t>(totalPixels))) // Exclusive
-			{
-				// const auto interpolatedColor = add(controlPoints[i].color, scale(colorDirection, static_cast<float>(j) / totalPixels)); // Perform linear interpolation
-				const auto interpolatedColor = toVec3(colorControlPoints[i - 1].color) + colorDirection * (static_cast<float>(j) / (totalPixels - 1)); // Perform linear interpolation
-				transferFunction[colorControlPoints[i - 1].position.x + j] = glm::vec4{
-					interpolatedColor.x // r
-					, interpolatedColor.y // g
-					, interpolatedColor.z // b
-					, 0.0f
-					//, interpolatedColor.w // a
-					//, 1.0f - interpolatedColor.w // Interpolated color's w (alpha) goes to 0 means hitting the ceiling of the histogram window -> increasing alpha (= 1 - w)
+			const auto remappedControlGraph = controlGraph | std::views::transform([&](const ControlPoint& controlPoint)
+			{ // Remapped to 1D whose control point x value is in [0, transferFunction.size())
+				return ControlPoint{
+					ImVec2{
+						(controlPoint.position.x / controlGraph.back().position.x) * (transferFunction.data.size() - 1)
+						, 0.0f
+					}
+					, controlPoint.intensity
 				};
-			}
-		}
+			});
 
-		// Set the alphas to each pixel
-		for (const auto& [i, controlPoint] : std::views::enumerate(remappedControlPoints))
-		{
-			if (i == 0) continue;
-			const auto alphaDirection = remappedControlPoints[i].color.Value.w - remappedControlPoints[i - 1].color.Value.w;
-			const auto totalPixels = remappedControlPoints[i].position.x - remappedControlPoints[i - 1].position.x + 1;
-			for (const auto j : std::views::iota(0u, static_cast<uint32_t>(totalPixels))) // Exclusive
+			for (const auto& [j, controlPoint] : remappedControlGraph | std::views::enumerate)
 			{
-				// const auto interpolatedColor = add(controlPoints[i].color, scale(colorDirection, static_cast<float>(j) / totalPixels)); // Perform linear interpolation
-				const auto interpolatedAlpha = remappedControlPoints[i - 1].color.Value.w + alphaDirection * (static_cast<float>(j) / (totalPixels - 1)); // Perform linear interpolation
-				transferFunction[remappedControlPoints[i - 1].position.x + j].w = interpolatedAlpha;
+				if (j == 0) continue;
+				const auto intensityDirection = remappedControlGraph[j].intensity - remappedControlGraph[j - 1].intensity;
+				const auto totalPixels = remappedControlGraph[j].position.x - remappedControlGraph[j - 1].position.x + 1;
+				for (const auto k : std::views::iota(0u, static_cast<uint32_t>(totalPixels))) // Exclusive
+				{
+					const auto interpolatedIntensity = remappedControlGraph[j - 1].intensity + intensityDirection * (k / (totalPixels - 1.0f)); // Perform linear interpolation
+					const auto currentPixel = remappedControlGraph[j - 1].position.x + k;
+					transferFunction.data[currentPixel] = glm::vec4{
+						//interpolatedColor.x // r
+						//, interpolatedColor.y // g
+						//, interpolatedColor.z // b
+						//, 0.0f
+						////, interpolatedColor.w // a
+						////, 1.0f - interpolatedColor.w // Interpolated color's w (alpha) goes to 0 means hitting the ceiling of the histogram window -> increasing alpha (= 1 - w)
+						i == 0 ? interpolatedIntensity : transferFunction.data[currentPixel].r
+						, i == 1 ? interpolatedIntensity : transferFunction.data[currentPixel].g
+						, i == 2 ? interpolatedIntensity : transferFunction.data[currentPixel].b
+						, i == 3 ? interpolatedIntensity : transferFunction.data[currentPixel].a
+					};
+				}
 			}
+
+			i++;
 		}
 	}
 	void updateTransferImage(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS
 
-		updateTransferFunction(controlPoints, transferFunction.data);
+		updateTransferFunction();
 
 		// Map the memory handle to the actual device memory (host visible, specified in the allocateMemory()) to upload the data
 		void* memory = device.mapMemory(transferImageStagingBufferMemory, 0, device.getBufferMemoryRequirements(transferImageStagingBuffer).size);
@@ -686,9 +680,8 @@ namespace
 			, transferImage
 			, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
 		}});
-
 	}
-	void updateShaderUniforms(const ApplicationInfo& applicationInfo)
+	void updatePixelTransformationUniforms(const ApplicationInfo& applicationInfo)
 	{
 		APPLICATION_INFO_BINDINGS;
 
@@ -756,7 +749,7 @@ namespace
 		APPLICATION_INFO_BINDINGS
 
 		updateTransferImage(applicationInfo);
-		updateShaderUniforms(applicationInfo);
+		updatePixelTransformationUniforms(applicationInfo);
 
 		// Transition layout of the image descriptors before compute pipeline
 		// Raycasted image layout: undefined -> general, expected by the descriptor
@@ -887,24 +880,25 @@ namespace
 
 	// ImGui, root & child windows
 	// Some dimension extent are subtracted by one because the index pixel goes from [0, Max)
-	void childHistogramCommands(const ImVec2& childExtent, const ImColor& backgroundColor)
+	void childHistogramCommands(const ImVec2& childExtent, const ImColor& backgroundColor, ControlGraph& controlGraph)
 	{
 		// Statics
-		static auto hitControlPoint = controlPoints.end(); // Currently clicked control point
+		static auto hitControlPoint = std::vector<ControlPoint>::iterator{}; // Currently clicked control point
 		static auto isDraggingControlPoint = false;
 
 		// Default values and helper functions
 		const auto defaultControlPointColor = ImColor{0.0f, 0.0f, 0.0f, 1.0f};
 		const auto controlPointRadius = 5.0f;
-		const auto getAlpha = [](const ImVec2& controlPointPosition, const ImVec2& childWindowExtent)
+		const auto getIntensity = [](const ImVec2& controlPointPosition, const ImVec2& childWindowExtent)
 		{
 			// The controlPointPosition is with respect to the child window cursor
-			return 1.0f - (controlPointPosition.y / (childWindowExtent.y - 1)); // Control point's y = 0 (hit the child window's ceiling) means max opacity = 1
+			// Control point's y = 0 (hit the child window's ceiling) means max opacity = 1
+			return 1.0f - (controlPointPosition.y / (childWindowExtent.y - 1));
 		};
 		const auto getHitControlPoint = [&](const ImVec2& cursor, const float tolerance = 10.0f)
 		{
 			// Return an optional index to a hit control point. Cursor is the cursor of the window in which the user clicks
-			return std::ranges::find_if(controlPoints, [&](const ControlPoint& controlPoint)
+			return std::ranges::find_if(controlGraph, [&](const ControlPoint& controlPoint)
 			{
 				// Add the cursor and the control point position to get to the screen space position instead of the control point being relative to the cursor
 				return length(subtract(add(cursor, controlPoint.position), ImGui::GetMousePos())) <= controlPointRadius + tolerance;
@@ -916,25 +910,30 @@ namespace
 		if (ImGui::BeginChild("Histogram Alpha", childExtent, true))
 		{
 			// TODO: if the extend is maxX, maxY. Must subtract it by 1 because index goes from [0, max) exclusive
-			//TODO: ImGui::GetWindowSize() after this instead of getChildExtent()?
+			// TODO: ImGui::GetWindowSize() after this instead of getChildExtent()?
 			const auto childWindowCursor = ImGui::GetCursorScreenPos(); // Must be placed above the visible button because we want the cursor of the current child window, not the button
 			const auto drawList = ImGui::GetWindowDrawList();
 
-			// Two default control points that aren't using the default control point color
-			if (controlPoints.empty())
+			// Two default control points for all of the control graphs at each end of the histogram
+			if (!areControlGraphsInitialized)
 			{
 				const auto leftMostControlPoint = unnormalizeCoordinate(ImVec2{0.0f, 1.0f}, ImVec2{childExtent.x - 1, childExtent.y - 1});
-				controlPoints.push_back(ControlPoint{
-					leftMostControlPoint
-					, ImColor{0.0f, 0.0f, 0.0f, getAlpha(leftMostControlPoint, childExtent)}
-				});
-				const auto rightMostControlPoint = unnormalizeCoordinate(ImVec2{1.0f, 0.0f}, ImVec2{childExtent.x - 1, childExtent.y - 1});
-				controlPoints.push_back(ControlPoint{
-					rightMostControlPoint
-					, ImColor{1.0f, 1.0f, 1.0f, getAlpha(rightMostControlPoint, childExtent)}
-				});
+				const auto rightMostControlPoint = unnormalizeCoordinate(ImVec2{1.0f, 1.0f}, ImVec2{childExtent.x - 1, childExtent.y - 1});
+
+				for (auto& controlGraph : controlGraphs)
+				{
+					controlGraph.push_back(ControlPoint{
+						leftMostControlPoint
+						, getIntensity(leftMostControlPoint, childExtent)
+					});
+					controlGraph.push_back(ControlPoint{
+						rightMostControlPoint
+						, getIntensity(rightMostControlPoint, childExtent)
+					});
+				}
+
+				areControlGraphsInitialized = true;
 			}
-			assert(controlPoints.front().position.y >= 0 && controlPoints.back().position.y >= 0); // Sanity check
 
 			// Mouse position capture area, push back any captured position (control point) for drawing
 			ImGui::InvisibleButton("Input position capture", childExtent, ImGuiMouseButton_Left | ImGuiMouseButton_Right);
@@ -943,57 +942,46 @@ namespace
 				if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) // Hovering over doesn't count as clicked, will automatically goes to the else if if dragging a control point
 				{
 					hitControlPoint = getHitControlPoint(childWindowCursor);
-					if (hitControlPoint != controlPoints.end()) isDraggingControlPoint = true;
+					if (hitControlPoint != controlGraph.end()) isDraggingControlPoint = true;
 					else // Add new control point
 					{
-						const auto clickedPositionGLFW = ImGui::GetMousePos(); // With respect to the glfw Window
-						const auto clickedPositionInChild = subtract(clickedPositionGLFW, childWindowCursor); // with respect to the child window button
-						controlPoints.push_back(ControlPoint{
+						const auto clickedPositionInChild = subtract(ImGui::GetMousePos(), childWindowCursor); // with respect to the child window button
+						controlGraph.push_back(ControlPoint{
 							clickedPositionInChild
-							, ImColor{
-								//defaultControlPointColor.Value.x
-								//, defaultControlPointColor.Value.y
-								//, defaultControlPointColor.Value.z
-								-1.0f // Default is just a new interpolated dummy to control the alpha between 2 endpoints
-								, -1.0f
-								, -1.0f
-								, getAlpha(clickedPositionInChild, childExtent)
-							}
+							, getIntensity(clickedPositionInChild, childExtent)
 						});
-						std::ranges::sort(controlPoints, [](const ImVec2& a, const ImVec2& b) {return a.x < b.x;}, [](const ControlPoint& controlPoint) {return controlPoint.position;}); // Only sort the control points in an ascending order based on the x position
+						std::ranges::sort(controlGraph, [](const ImVec2& a, const ImVec2& b)
+						{
+							return a.x < b.x;
+						}, &ControlPoint::position);
 					}
 				}
 				else if (isDraggingControlPoint) // Only changing the y axis
 				{
-					const auto clickedPositionGLFW = ImGui::GetMousePos(); // With respect to the glfw Window
-					auto clickedPositionInChild = subtract(clickedPositionGLFW, childWindowCursor);
+					auto clickedPositionInChild = subtract(ImGui::GetMousePos(), childWindowCursor);
+					auto isEndControlPoint = (hitControlPoint == controlGraph.begin()) || (hitControlPoint == controlGraph.end() - 1);
+					const auto endControlPointSize = 2.0f * controlPointRadius;
 
-					// Clipping, constraint the draggable area
-					if (clickedPositionInChild.y < 0.0f) clickedPositionInChild.y = 0.0f;
-					else if (clickedPositionInChild.y > childExtent.y - 1) clickedPositionInChild.y = childExtent.y - 1;
-					// Restrict to only y-axis if dragging the control point at either ends
-					if (hitControlPoint != controlPoints.begin() && hitControlPoint != controlPoints.end() - 1)
-					{
-						if (clickedPositionInChild.x < 0.0f) clickedPositionInChild.x = 0.0f;
-						else if (clickedPositionInChild.x > childExtent.x - 1) clickedPositionInChild.x = childExtent.x - 1;
-					}
-					else clickedPositionInChild.x = hitControlPoint->position.x;
+					clickedPositionInChild.y = std::clamp(clickedPositionInChild.y, 0.0f, childExtent.y - 1);
+					clickedPositionInChild.x = std::clamp(clickedPositionInChild.x, endControlPointSize, (childExtent.x - 1) - endControlPointSize); // Avoid swapping the current dragged control points with either control points at the ends
 					hitControlPoint->position.y = clickedPositionInChild.y;
-					hitControlPoint->position.x = clickedPositionInChild.x;
-					// Update the alpha after shifted to a new position
-					hitControlPoint->color.Value.w = getAlpha(clickedPositionInChild, childExtent);
+					if (!isEndControlPoint) hitControlPoint->position.x = clickedPositionInChild.x;
+					hitControlPoint->intensity = getIntensity(clickedPositionInChild, childExtent);
 
-					// Update the hitIndex location after sorted
-					std::ranges::sort(controlPoints, [](const ImVec2& a, const ImVec2& b)
+					if (!isEndControlPoint)
 					{
-						return a.x < b.x;
-					}, [](const ControlPoint& controlPoint)
-					{
-						return controlPoint.position; // Only sort the control points in an ascending order based on the x position
-					});
-					hitControlPoint = std::ranges::find_if(controlPoints, [&](const ControlPoint& controlPoint){
-						return controlPoint.position.x == clickedPositionInChild.x && controlPoint.position.y == clickedPositionInChild.y;
-					});
+						// Update the control points location after one is dragged
+						std::ranges::sort(controlGraph, [](const ImVec2& a, const ImVec2& b)
+						{
+							return a.x <= b.x; // Make sure this is <= instead of < because we want to move the hitControlPoint after the default control points at either ends
+						}, &ControlPoint::position);
+
+						hitControlPoint = std::ranges::find_if(controlGraph, [&](const ControlPoint& controlPoint)
+						{
+							return controlPoint.position.x == clickedPositionInChild.x
+								&& controlPoint.position.y == clickedPositionInChild.y;
+						});
+					}
 				}
 			}
 			else isDraggingControlPoint = false;
@@ -1001,7 +989,7 @@ namespace
 			if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) // If this is false then the popup won't be drawn, we need to seperate openpopup  and beginpopup instaed of placing both in this conditional statement
 			{
 				hitControlPoint = getHitControlPoint(childWindowCursor);
-				if (hitControlPoint != controlPoints.end())
+				if (hitControlPoint != controlGraph.end())
 				{
 					ImGui::OpenPopup("Input position capture");
 				}
@@ -1015,15 +1003,13 @@ namespace
 				//	ImGui::OpenPopup("Change color");
 				//}
 				// Casting the address of the color of the current hit control point to float[3]. Since ImColor is the same as float[4], it is valid to do this.
-				ImGui::ColorPicker3("###", (float*)&(hitControlPoint->color), ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha);
+				//ImGui::ColorPicker3("###", (float*)&(hitControlPoint->intensity), ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha);
 				if (ImGui::MenuItem("Delete"))
 				{
-					auto iterControlPoint = hitControlPoint;
-					//std::advance(iterControlPoint, hitControlPoint.value());
 					// Can't delete the first and the final control points
-					if (controlPoints.size() > 2
-						&& iterControlPoint != controlPoints.begin()
-						&& iterControlPoint != controlPoints.end() - 1) controlPoints.erase(iterControlPoint);
+					if (controlGraph.size() > 2
+						&& hitControlPoint != controlGraph.begin()
+						&& hitControlPoint != controlGraph.end() - 1) controlGraph.erase(hitControlPoint);
 				}
 				ImGui::EndPopup();
 			}
@@ -1049,40 +1035,38 @@ namespace
 				//drawList->AddLine()
 			}
 
-			// Draw any connection lines. Draw connection lines first then draw the control points to make the control points ontop of the lines
-			for (int i = 1; i < controlPoints.size(); i++)
+			// Draw all of the control graphs . Draw connection lines first then draw the control points to make the control points ontop of the lines
+			for (const auto& [i, controlGraph] : controlGraphs | std::views::enumerate)
 			{
-				drawList->AddLine(
-					add(childWindowCursor, controlPoints[i - 1].position) // The control points are with respect to the child window cursor, we need to offset them to the ImGui screen position before using them
-					, add(childWindowCursor, controlPoints[i].position)
-					, ImColor{1.0f, 1.0f, 1.0f}
-				);
-			}
-
-			// Draw control points
-			for (const auto& controlPoint : controlPoints)
-			{
-				if (controlPoint.color.Value.x == -1.0f) // Dummy control point
+				auto color = ImColor{};
+				switch (i)
 				{
-					drawList->AddCircle(
-						add(childWindowCursor, controlPoint.position)
-						, controlPointRadius
-						, ImColor{1.0f, 1.0f, 1.0f, 1.0f}
-						, 1.0f);
+					case 0: color = ImColor{1.0f, 0.0f, 0.0f, 1.0f}; break;
+					case 1: color = ImColor{0.0f, 1.0f, 0.0f, 1.0f}; break;
+					case 2: color = ImColor{0.0f, 0.0f, 1.0f, 1.0f}; break;
+					case 3: color = ImColor{0.0f, 0.0f, 0.0f, 1.0f}; break;
 				}
-				else
+
+				// Draw any connection lines
+				for (const auto& [j, controlPoint] : controlGraph | std::views::enumerate)
+				{
+					if (j == 0) continue;
+					drawList->AddLine(
+						add(childWindowCursor, controlGraph[j - 1].position) // The control points are with respect to the child window cursor, we need to offset them to the ImGui screen position before using them
+						, add(childWindowCursor, controlGraph[j].position)
+						, color);
+				}
+
+				// Draw control points
+				for (const auto& controlPoint : controlGraph)
 				{
 					drawList->AddCircleFilled(
 						add(childWindowCursor, controlPoint.position)
 						, controlPointRadius
-						, ImColor{
-							controlPoint.color.Value.x
-							, controlPoint.color.Value.y
-							, controlPoint.color.Value.z
-							, 1.0f // We want to see the color, the alpha of this color is implied by the position of the control point in the window and the color spectrum
-						}
+						, color
 						, 0);
 				}
+
 			}
 
 			drawList->PopClipRect();
@@ -1091,7 +1075,7 @@ namespace
 		ImGui::PopStyleColor();
 		ImGui::PopStyleVar();
 	}
-	void childColorSpectrumCommands(const ImVec2& childExtent, const ImColor& background)
+	void childColorSpectrumCommands(const ImVec2& childExtent, const ImColor& background, const ControlGraph& controlGraph)
 	{
 		// TODO: if the extend is maxX, maxY. Must subtract it by 1 because index goes from [0, max) exclusive
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0}); // Needed to avoid padding between the child window and the clip rect, tested with a visible button
@@ -1104,33 +1088,33 @@ namespace
 			// Draw each of the color spectrum rectangles per 2 control points
 			drawList->PushClipRect(childWindowCursor, add(childWindowCursor, childExtent));
 
-			const auto colorControlPoints = controlPoints | std::views::filter([](const ControlPoint& controlPoint){
-				return controlPoint.color.Value.x != -1.0f; // Only need to check R since G & B = -1 for dummy control points, filter out all dummy control points
-			}) | std::ranges::to<std::vector>();
+			//const auto colorControlPoints = controlGraph | std::views::filter([](const ControlPoint& controlPoint){
+			//	return controlPoint.color.Value.x != -1.0f; // Only need to check R since G & B = -1 for dummy control points, filter out all dummy control points
+			//}) | std::ranges::to<std::vector>();
 
-			for (const auto& [i, controlPoint] : std::views::enumerate(colorControlPoints))
-			{
-				if (i == 0) continue;
+			//for (const auto& [i, controlPoint] : std::views::enumerate(colorControlPoints))
+			//{
+			//	if (i == 0) continue;
 
-				const auto upperLeftPosition = ImVec2{childWindowCursor.x + colorControlPoints[i - 1].position.x, childWindowCursor.y};
-				// const auto leftColor = controlPoints[i - 1].color; // Including alpha
-				auto leftColor = colorControlPoints[i - 1].color;
-				leftColor.Value.w = 1;
+			//	const auto upperLeftPosition = ImVec2{childWindowCursor.x + colorControlPoints[i - 1].position.x, childWindowCursor.y};
+			//	// const auto leftColor = controlPoints[i - 1].color; // Including alpha
+			//	auto leftColor = colorControlPoints[i - 1].color;
+			//	leftColor.Value.w = 1;
 
-				const auto lowerRightPosition = ImVec2{childWindowCursor.x + colorControlPoints[i].position.x, childWindowCursor.y + childExtent.y}; // Adding y of the child extent to reach to the floor of the current child window
-				// const auto rightColor = controlPoints[i].color;  // Including alpha
-				auto rightColor = colorControlPoints[i].color;
-				rightColor.Value.w = 1;
+			//	const auto lowerRightPosition = ImVec2{childWindowCursor.x + colorControlPoints[i].position.x, childWindowCursor.y + childExtent.y}; // Adding y of the child extent to reach to the floor of the current child window
+			//	// const auto rightColor = controlPoints[i].color;  // Including alpha
+			//	auto rightColor = colorControlPoints[i].color;
+			//	rightColor.Value.w = 1;
 
-				drawList->AddRectFilledMultiColor(
-					upperLeftPosition
-					, lowerRightPosition
-					, leftColor // Upper left
-					, rightColor // Upper right
-					, rightColor // Lower right
-					, leftColor // Lower left
-				);
-			}
+			//	drawList->AddRectFilledMultiColor(
+			//		upperLeftPosition
+			//		, lowerRightPosition
+			//		, leftColor // Upper left
+			//		, rightColor // Upper right
+			//		, rightColor // Lower right
+			//		, leftColor // Lower left
+			//	);
+			//}
 
 			drawList->PopClipRect();
 		}
@@ -1144,29 +1128,36 @@ namespace
 		//const auto& io = ImGui::GetIO();
 		ImGui::SetNextWindowPos(ImVec2{0, 0}, ImGuiCond_Always);
 		ImGui::SetNextWindowSize(ImVec2{500.0f, windowExtent.y}, ImGuiCond_Always);
+
+		// *** Use enum class? or enum?
+		static auto chosenControlGraph = 0; // Red (0), Green (1), Blue (2), Alpha (3)
+
 		if (ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
 		{
 			//ImGui::SetCursorScreenPos(ImVec2{0, 0});
-			if (ImGui::Button("Reset Control Points")) controlPoints.clear();
-			ImGui::SameLine();
-			if (ImGui::Button("Reset Rotations"))
+			if (ImGui::Button("Reset Control Points")) for (auto& controlGraph : controlGraphs) controlGraph.clear();
+			if (ImGui::SameLine(); ImGui::Button("Reset Rotations"))
 			{
 				horizontalRadian = 0.0f;
 				verticalRadian = 0.0f;
 			}
 			ImGui::SliderAngle("Rotate Horizontal", &horizontalRadian, -180.0f, 180.0f);
 			ImGui::SliderAngle("Rotate Vertical", &verticalRadian, -90.0f, 90.0f);
+			ImGui::RadioButton("R", &chosenControlGraph, 0); ImGui::SameLine();
+			ImGui::RadioButton("G", &chosenControlGraph, 1); ImGui::SameLine();
+			ImGui::RadioButton("B", &chosenControlGraph, 2); ImGui::SameLine();
+			ImGui::RadioButton("A", &chosenControlGraph, 3);
 
 			const auto backgroundColor = ImColor{0.5f, 0.5f, 0.5f, 0.3f};
 			childHistogramCommands(ImVec2{
 				ImGui::GetContentRegionAvail().x
 				, (11.0f / 12.0f * ImGui::GetContentRegionAvail().y)// - (ImGui::GetStyle().FramePadding.y / 2.0f) // Frame padding divided by 2 because we have 2 child windows
-			}, backgroundColor);
+			}, backgroundColor, controlGraphs[chosenControlGraph]);
 			childColorSpectrumCommands(ImVec2{
 				// The remaining content region
 				ImGui::GetContentRegionAvail().x
 				, ImGui::GetContentRegionAvail().y
-			}, backgroundColor);
+			}, backgroundColor, controlGraphs[chosenControlGraph]);
 
 			// Rendered image window
 			const auto widgetWindowWidth = ImGui::GetWindowSize().x; // TODO: Check if equal 500.0f
