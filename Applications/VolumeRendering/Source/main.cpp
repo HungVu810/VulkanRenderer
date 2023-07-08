@@ -960,12 +960,17 @@ namespace
 				{
 					auto clickedPositionInChild = subtract(ImGui::GetMousePos(), childWindowCursor);
 					auto isEndControlPoint = (hitControlPoint == controlGraph.begin()) || (hitControlPoint == controlGraph.end() - 1);
-					const auto endControlPointSize = 2.0f * controlPointRadius;
 
 					clickedPositionInChild.y = std::clamp(clickedPositionInChild.y, 0.0f, childExtent.y - 1);
-					clickedPositionInChild.x = std::clamp(clickedPositionInChild.x, endControlPointSize, (childExtent.x - 1) - endControlPointSize); // Avoid swapping the current dragged control points with either control points at the ends
+					if (!isEndControlPoint)
+					{
+						// Avoid swapping the current dragged control points with either control points at the ends
+						clickedPositionInChild.x = std::clamp(clickedPositionInChild.x, std::prev(hitControlPoint)->position.x + controlPointRadius, std::next(hitControlPoint)->position.x - controlPointRadius);
+					}
+					else clickedPositionInChild.x = hitControlPoint->position.x; // Either of the end control points
+
 					hitControlPoint->position.y = clickedPositionInChild.y;
-					if (!isEndControlPoint) hitControlPoint->position.x = clickedPositionInChild.x;
+					hitControlPoint->position.x = clickedPositionInChild.x;
 					hitControlPoint->intensity = getIntensity(clickedPositionInChild, childExtent);
 
 					if (!isEndControlPoint)
@@ -976,6 +981,7 @@ namespace
 							return a.x <= b.x; // Make sure this is <= instead of < because we want to move the hitControlPoint after the default control points at either ends
 						}, &ControlPoint::position);
 
+						// Refind the sorted hitControlPoint
 						hitControlPoint = std::ranges::find_if(controlGraph, [&](const ControlPoint& controlPoint)
 						{
 							return controlPoint.position.x == clickedPositionInChild.x
@@ -1135,7 +1141,11 @@ namespace
 		if (ImGui::Begin("Transfer function editor", 0, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) // Create a window. No resizing because this is mess up the control point positions, temporary doing this for now.
 		{
 			//ImGui::SetCursorScreenPos(ImVec2{0, 0});
-			if (ImGui::Button("Reset Control Points")) for (auto& controlGraph : controlGraphs) controlGraph.clear();
+			if (ImGui::Button("Reset Control Points"))
+			{
+				for (auto& controlGraph : controlGraphs) controlGraph.clear();
+				areControlGraphsInitialized = false;
+			}
 			if (ImGui::SameLine(); ImGui::Button("Reset Rotations"))
 			{
 				horizontalRadian = 0.0f;
