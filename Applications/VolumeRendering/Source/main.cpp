@@ -29,15 +29,16 @@ namespace
 	using Intensity = float; // Can't do short because sampler3D will always return a vec of floats
 	constexpr auto windowExtent = glm::u32vec2{1280, 720}; // (800, 800), (1280, 720)
 
-	constexpr auto NUM_SLIDES = 113; // Ratio is 1:1:2, 2 unit of depth
-	constexpr auto SLIDE_HEIGHT = 256;
-	constexpr auto SLIDE_WIDTH = 256;
-	constexpr auto NUM_INTENSITIES = NUM_SLIDES * SLIDE_HEIGHT * SLIDE_WIDTH;
-	constexpr auto TOTAL_SCAN_BYTES = NUM_INTENSITIES * sizeof(Intensity);
-	// struct CtData{extent, byte scanned, type (always float because of sampler3D)}
+	struct VolumeSlidesInfo
+	{
+		uint32_t size; // Total number of slides
+		uint32_t width; // Number of column pixels of a slide
+		uint32_t height; // Number of row pixels of a slide
+	};
+	auto volumeSlidesInfo = VolumeSlidesInfo{0, 0, 0};
+	auto intensities = Resource{std::vector<Intensity>{}, toVulkanFormat<Intensity>()}; // The actual data used for sampling
 
 	// z-y-x order, contains all intensity values of each slide images. Tightly packed vector instead of array because NUM_INTENSITIES is large, occupy the heap instead
-	auto intensities = Resource{std::vector<Intensity>(NUM_INTENSITIES), toVulkanFormat<Intensity>()}; // The actual data used for sampling
 	auto shaderMap = std::unordered_map<std::string, Shader>{};
 	vk::Image volumeImage, transferImage, raycastedImage, presentedImguiImage;
 	vk::Buffer volumeImageStagingBuffer, transferImageStagingBuffer, viewPyramidStructBuffer, pixelToWorldSpaceTransformBuffer;
@@ -75,14 +76,33 @@ namespace
 	};
 	auto verticalRadian = 0.0f;
 
+	// Scene
+	struct Scene
+	{
+		//glm::vec3 lightColor;
+		//glm::vec3 lightLocation;
+		//glm::vec3 ambientLight;
+		float ambient;
+		float diffuse;
+		float specular;
+		float shininess;
+	};
+	auto scene = Scene{
+		//glm::vec3{1, 1, 1}
+		//, glm::vec3{0, 0, -1}
+		//, glm::vec3{0.3, 0.3, 0.3}
+		1.0f
+		, 1.0f
+		, 1.0f
+		, 100.0f
+	};
+
 	// ImGui
 	struct ControlPoint
 	{
 		ImVec2 position; // With respect to the histogram child window cursor, are always whole numbers
 		float intensity;
 	};
-	// auto controlPoints = std::vector<ControlPoint>{}; // Clicked control points, the position is relative to the histogram window cursor
-	//using ControlPoint = ImVec2;
 	using ControlGraph = std::vector<ControlPoint>;
 	auto areControlGraphsInitialized = false; // First frame, the 2 default control points for each control graphs aren't pushed yet. The transferFunction will have its elements assigned with glm::vec4{0.0f, 0.0f, 0.0f, 0.0f}
 	auto controlGraphs = std::vector<ControlGraph>(4); // RGBA
@@ -91,28 +111,57 @@ namespace
 
 	void loadVolumeData()
 	{
-		auto dataIndex = 0;
-		for (auto slideIndex = 1; slideIndex <= NUM_SLIDES; slideIndex++)
+		auto maxIntensity = 0.0f;
+
+		auto filePaths = std::vector<std::filesystem::path>{};
+		for (const auto& entry : std::filesystem::directory_iterator{VOLUME_DATA}) filePaths.push_back(entry.path());
+		std::ranges::sort(filePaths, [](int a, int b)
 		{
-			const auto ctPath = std::filesystem::path{VOLUME_DATA"/CThead." + std::to_string(slideIndex)};
-			auto ctFile = std::ifstream{ctPath, std::ios_base::binary};
-			if (!ctFile) throw std::runtime_error{"Can't open file at " + ctPath.string()};
+			return a < b;
+		}, [](const std::filesystem::path& path)
+		{
+			if (path.has_extension())
+			{
+				const auto extension = path.extension().string();
+				return std::stoi(std::string_view{extension.begin() + 1, extension.end()}.data()); // Remove the extension dot at the front
+			}
+			else return std::stoi(path.filename().string());
+		});
+
+		for (const auto& path : filePaths)
+		{
+			auto file = std::ifstream{path, std::ios_base::binary};
+			if (!file) throw std::runtime_error{"Can't open file at " + path.string()};
 
 			// Volume data is of type short, mentioned in the Stanford document
-			for (auto intensity = uint16_t{0}; ctFile.read(reinterpret_cast<char*>(&intensity), sizeof(intensity)); dataIndex++)
+			auto intensity = uint16_t{0};
+			while (file.read(reinterpret_cast<char*>(&intensity), sizeof(intensity)))
 			{
 				// Swap byte order if running on little-endian system
 				#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-					data = (data >> 8) | (data << 8);
+					intensity = (intensity >> 8) | (intensity << 8);
 				#endif
-				intensities.data[dataIndex] = intensity;
+				if (maxIntensity < intensity) maxIntensity = intensity;
+				intensities.data.push_back(intensity);
+			}
+
+			volumeSlidesInfo.size++;
+
+			if (volumeSlidesInfo.size == 1)
+			{
+				// Update the extend once, always assume that the CT image is a squared image
+				volumeSlidesInfo.height = std::sqrt(intensities.data.size());
+				volumeSlidesInfo.width = volumeSlidesInfo.height;
 			}
 		}
+
+		if (volumeSlidesInfo.size == 0) throw std::runtime_error{std::string{"Unavailable volume data files for loading at "} + VOLUME_DATA};
+
 		// Normalize the data to [0, 1]
-		const auto iterMax = std::ranges::max_element(intensities.data);
-		const auto maxIntensity = *iterMax;
-		const auto normalize = [&](Intensity& intensity){return intensity /= maxIntensity;};
-		std::ranges::for_each(intensities.data, normalize);
+		std::ranges::for_each(intensities.data, [&](Intensity& intensity)
+		{
+			return intensity /= maxIntensity;
+		});
 	}
 	void prepareHistogramVolumeData()
 	{
@@ -196,7 +245,7 @@ namespace
 				{}
 				, vk::ImageType::e3D
 				, intensities.format
-				, {SLIDE_WIDTH, SLIDE_HEIGHT, NUM_SLIDES}
+				, vk::Extent3D{volumeSlidesInfo.width, volumeSlidesInfo.height, volumeSlidesInfo.size}
 				, 1
 				, 1
 				, vk::SampleCountFlagBits::e1
@@ -210,10 +259,12 @@ namespace
 		};
 		const auto setupVolumeImageStagingBuffer = [&]()
 		{
+			const auto totalVolumeSlidesBytes = volumeSlidesInfo.size * volumeSlidesInfo.height * volumeSlidesInfo.width * sizeof(Intensity);
+
 			// Reserve device memory for staging buffer
 			volumeImageStagingBuffer = device.createBuffer(vk::BufferCreateInfo{
 				{}
-				, TOTAL_SCAN_BYTES
+				, totalVolumeSlidesBytes
 				, vk::BufferUsageFlagBits::eTransferSrc // Store and transfer volume data to volume image stored on the device memory via a copy command
 				, vk::SharingMode::eExclusive
 				, queueFamiliesIndex
@@ -224,7 +275,7 @@ namespace
 
 			// Upload volume data to the staging buffer, we will transfer this staging buffer data over to the volume image later
 			void* memory = device.mapMemory(volumeImageStagingBufferMemory, 0, stagingBufferMemoryRequirement.size);
-			std::memcpy(memory, intensities.data.data(), TOTAL_SCAN_BYTES);
+			std::memcpy(memory, intensities.data.data(), totalVolumeSlidesBytes);
 			device.unmapMemory(volumeImageStagingBufferMemory);
 		};
 		const auto setupRaycastedImageDeviceMemory = [&]()
@@ -313,24 +364,23 @@ namespace
 			// Describe the binding numbers of the descriptors (To check against the association step)
 			sampler = device.createSampler(vk::SamplerCreateInfo{
 				{}
-				//, vk::Filter::eNearest // TODO: try linear
 				, vk::Filter::eLinear
-				//, vk::Filter::eNearest // TODO: try linear
 				, vk::Filter::eLinear
 				, vk::SamplerMipmapMode::eNearest
 				, vk::SamplerAddressMode::eClampToBorder // U
 				, vk::SamplerAddressMode::eClampToBorder // V
 				, vk::SamplerAddressMode::eClampToBorder // W
 				, 0.0f
-				, VK_FALSE
+				, VK_FALSE // Anisotropy
 				, 0.0f
 				, VK_FALSE
 				, vk::CompareOp::eNever
 				, 0.0f
 				, 0.0f
 				, vk::BorderColor::eIntOpaqueBlack // Border Color
-				, VK_FALSE // Always normalize coordinate
+				, VK_FALSE  // False so we can always normalize coordinate
 			});
+
 			const auto layoutBindings = {
 				// Volume image
 				vk::DescriptorSetLayoutBinding{
@@ -509,7 +559,10 @@ namespace
 			, volumeShaderModule
 			, "main"
 		};
-		computePipelineLayout = device.createPipelineLayout(vk::PipelineLayoutCreateInfo{{}, descriptorSetLayout});
+
+		// Push constants
+		const auto scenePushConstant = vk::PushConstantRange{vk::ShaderStageFlagBits::eCompute, 0, sizeof(scene)};
+		computePipelineLayout = device.createPipelineLayout(vk::PipelineLayoutCreateInfo{{}, descriptorSetLayout, scenePushConstant});
 		const auto resultValue = device.createComputePipeline({}, vk::ComputePipelineCreateInfo{
 			{}
 			, computeShaderStageCreateInfo
@@ -556,7 +609,7 @@ namespace
 					, 1
 				}
 				, vk::Offset3D{0, 0, 0}
-				, vk::Extent3D{SLIDE_WIDTH, SLIDE_HEIGHT, NUM_SLIDES}
+				, vk::Extent3D{volumeSlidesInfo.width, volumeSlidesInfo.height, volumeSlidesInfo.size}
 			});
 			// Volume image layout: transferDstOptimal -> shaderReadOnlyOptimal
 			commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, {vk::ImageMemoryBarrier{
@@ -750,6 +803,9 @@ namespace
 
 		updateTransferImage(applicationInfo);
 		updatePixelTransformationUniforms(applicationInfo);
+
+		// Update scene parameters
+		commandBuffer.pushConstants<Scene>(computePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0U, scene);
 
 		// Transition layout of the image descriptors before compute pipeline
 		// Raycasted image layout: undefined -> general, expected by the descriptor
@@ -1153,6 +1209,10 @@ namespace
 			}
 			ImGui::SliderAngle("Rotate Horizontal", &horizontalRadian, -180.0f, 180.0f);
 			ImGui::SliderAngle("Rotate Vertical", &verticalRadian, -90.0f, 90.0f);
+			ImGui::SliderFloat("Ambient", &scene.ambient, 0.0f, 1.0f);
+			ImGui::SliderFloat("Diffuse", &scene.diffuse, 0.0f, 1.0f);
+			ImGui::SliderFloat("Specular", &scene.specular, 0.0f, 1.0f);
+			ImGui::SliderFloat("Shininess", &scene.shininess, 1.0f, 128.0f);
 			ImGui::RadioButton("R", &chosenControlGraph, 0); ImGui::SameLine();
 			ImGui::RadioButton("G", &chosenControlGraph, 1); ImGui::SameLine();
 			ImGui::RadioButton("B", &chosenControlGraph, 2); ImGui::SameLine();

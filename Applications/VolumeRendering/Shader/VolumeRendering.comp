@@ -21,6 +21,17 @@ layout(set = 0, binding = 4, column_major) uniform PixelTransform {
 	mat4 toWorld;
 } pixelTransform;
 
+//Push constants block
+layout(push_constant) uniform Scene {
+//	vec3 lightColor;
+//	vec3 lightLocation;
+//	vec3 ambientLight;
+	float ambient;
+	float diffuse;
+	float specular;
+	float shininess;
+} scene;
+
 struct Ray {
 	vec3 origin;
 	vec3 direction;
@@ -112,10 +123,10 @@ vec3 computeNormal(vec3 sampleLocation, vec3 samplerOrigin, float stepSize) {
 vec3 shading(vec3 N, vec3 V, vec3 L) {
 
 	// TODO: Material properties, allow them to be modifiable along with the light location, light color
-	float Ka = 1.0f; // Ambient
-	float Kd = 1.0f; // Diffuse
-	float Ks = 1.0f; // Specular
-	float shininess = 100.0f;
+	// float Ka = 1.0f; // Ambient
+	// float Kd = 1.0f; // Diffuse
+	// float Ks = 1.0f; // Specular
+	// float shininess = 100.0f;
 	// Emissive and ambient occlusion terms?
 
 	// Light properties
@@ -126,16 +137,16 @@ vec3 shading(vec3 N, vec3 V, vec3 L) {
 	vec3 H = normalize(L + V);
 
 	// Compute ambient term
-	vec3 ambient = Ka * ambientLight;
+	vec3 ambient = scene.ambient * ambientLight;
 
 	// Compute the diffuse term
 	float diffuseLight = max(dot(L, N), 0);
-	vec3 diffuse = Kd * lightColor * diffuseLight;
+	vec3 diffuse = scene.diffuse * lightColor * diffuseLight;
 
 	// Compute the specular term
-	float specularLight = pow(max(dot(H, N), 0), shininess);
+	float specularLight = pow(max(dot(H, N), 0), scene.shininess);
 	if (diffuseLight <= 0) specularLight = 0;
-	vec3 specular = Ks * lightColor * specularLight;
+	vec3 specular = scene.specular * lightColor * specularLight;
 
 	return ambient + diffuse + specular;
 }
@@ -155,11 +166,11 @@ void main() {
 	const vec3 volumeMin = vec3(-0.5, -0.5, -1); // Proxy volume origin, bottom left corner at the back
 	const vec3 volumeMax = vec3(0.5, 0.5, 0);
 	const vec3 samplerOrigin = vec3(-0.5, -0.5, 0); // Could be any of the 8 corner of the volume grid
-	//const vec3 lightLocation = vec3(0, -5, -0.5); // Front
 	const vec3 lightLocation = vec3(0, 0, -1); // Top down
 	// const vec3 lightLocation = vec3(0, 0, 1); // Bottom up
+	// const vec3 lightLocation = vec3(0, -5, -0.5); // Front
 
-	uint samples = 300; // The samples >= 0 within the 2 defaults samples at each extremes tMin and tMax, 113 slides
+	uint samples = 200; // The samples >= 0 within the 2 defaults samples at each extremes tMin and tMax, 113 slides
 	vec3 clearColor = vec3(0, 0, 0); // For pixels that doesn't hit
 	vec3 pixelColor = vec3(0); // Final color for the current pixel
 
@@ -179,13 +190,13 @@ void main() {
 				pixelColor = lookupColor(intensity); // Emission value
 			}
 			else { // Going to the front
-				vec3 sampleColor = lookupColor(intensity); // Emission value
+				vec3 sampleColor = lookupColor(intensity);
 
-				const vec3 sampleNormal = computeNormal(sampleLocation, samplerOrigin, stepSize);
-				const vec3 sampleToView = viewPyramid.location.xyz - sampleLocation; // The view direction will be toward the pixel location in world space
-				const vec3 sampleToLight = lightLocation - sampleLocation; // Let the top of the view pyramid be the light location since we only need one light
-				sampleColor += shading(sampleNormal, sampleToView, sampleToLight); // Local illumination
-
+//				const vec3 sampleNormal = computeNormal(sampleLocation, samplerOrigin, stepSize);
+//				const vec3 sampleToView = viewPyramid.location.xyz - sampleLocation; // The view direction will be toward the pixel location in world space
+//				const vec3 sampleToLight = lightLocation - sampleLocation; // Let the top of the view pyramid be the light location since we only need one light
+//				sampleColor += shading(sampleNormal, sampleToView, sampleToLight); // Local illumination
+//
 				pixelColor = lookupAlpha(intensity) * sampleColor + (1 - lookupAlpha(intensity)) * pixelColor; // Emission & Absorption value, absorpting the previous accumulated color
 			}
 		}

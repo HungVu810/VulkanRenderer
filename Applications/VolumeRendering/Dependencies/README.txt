@@ -1,0 +1,1 @@
+The VolumeData folder must contains N number of slides (Z). Each slides is X by Y pixels. Each pixel represents an intensity value of type 16-bit integer.
